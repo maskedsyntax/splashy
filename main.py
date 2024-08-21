@@ -27,7 +27,7 @@ root = tk.Tk()
 root.title("Splashyyy")
 root.geometry("1050x570+150+50")
 root.configure(bg="#f2f3f5")
-root.resizable(False, False)
+root.resizable(True, True)
 
 # TODO: create and insert logo here
 # image_icon = PhotoImage(file="")
