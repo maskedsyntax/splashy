@@ -334,15 +334,15 @@ class SplashyWindow(Gtk.Window):
         # Tool buttons
         self.tool_buttons = {}
         tools = [
-            ("Pen", DrawingTool.PEN, "✏️"),
-            ("Eraser", DrawingTool.ERASER, "🧽"),
-            ("Line", DrawingTool.LINE, "📏"),
-            ("Rectangle", DrawingTool.RECTANGLE, "⬜"),
-            ("Circle", DrawingTool.CIRCLE, "⭕")
+            ("Pen", DrawingTool.PEN),
+            ("Eraser", DrawingTool.ERASER),
+            ("Line", DrawingTool.LINE),
+            ("Rectangle", DrawingTool.RECTANGLE),
+            ("Circle", DrawingTool.CIRCLE)
         ]
         
-        for name, tool, icon in tools:
-            btn = Gtk.ToggleButton(label=f"{icon} {name}")
+        for name, tool in tools:
+            btn = Gtk.ToggleButton(label=f"{name}")
             btn.connect('toggled', lambda x, t=tool: self.on_tool_selected(t))
             self.tool_buttons[tool] = btn
             tools_box.pack_start(btn, False, False, 0)
