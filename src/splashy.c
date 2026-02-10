@@ -472,6 +472,41 @@ static void on_background_color_clicked(GtkButton *btn, gpointer user_data) {
     gtk_widget_destroy(dialog);
 }
 
+static void on_save_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)btn;
+
+    GtkWidget *dialog;
+    GtkFileChooser *chooser;
+    GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_SAVE;
+    gint res;
+
+    dialog = gtk_file_chooser_dialog_new("Save Canvas",
+                                         GTK_WINDOW(app->window),
+                                         action,
+                                         "_Cancel",
+                                         GTK_RESPONSE_CANCEL,
+                                         "_Save",
+                                         GTK_RESPONSE_ACCEPT,
+                                         NULL);
+    chooser = GTK_FILE_CHOOSER(dialog);
+
+    gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
+    gtk_file_chooser_set_current_name(chooser, "drawing.png");
+
+    res = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (res == GTK_RESPONSE_ACCEPT) {
+        char *filename;
+        filename = gtk_file_chooser_get_filename(chooser);
+        
+        cairo_surface_write_to_png(app->surface, filename);
+        
+        g_free(filename);
+    }
+
+    gtk_widget_destroy(dialog);
+}
+
 static void on_clear_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
@@ -603,6 +638,10 @@ static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     g_object_set(act_box, "margin", 10, NULL);
     
+    GtkWidget *save_btn = gtk_button_new_with_label("💾 Save Canvas");
+    g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_clicked), app);
+    gtk_box_pack_start(GTK_BOX(act_box), save_btn, FALSE, FALSE, 0);
+
     GtkWidget *clr_btn = gtk_button_new_with_label("🗑️ Clear Canvas");
     g_signal_connect(clr_btn, "clicked", G_CALLBACK(on_clear_clicked), app);
     gtk_box_pack_start(GTK_BOX(act_box), clr_btn, FALSE, FALSE, 0);

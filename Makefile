@@ -2,15 +2,19 @@ CC = gcc
 CFLAGS = -Wall -Wextra -O2 `pkg-config --cflags gtk+-3.0` -lm
 LDFLAGS = `pkg-config --libs gtk+-3.0` -lm
 
-TARGET = splashy_c
-SRC = splashy.c
+TARGET = splashy
+SRC = src/splashy.c
+BUILD_DIR = build
 
-all: $(TARGET)
+all: directories $(BUILD_DIR)/$(TARGET)
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS)
+$(BUILD_DIR)/$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+directories:
+	mkdir -p $(BUILD_DIR)
 
 clean:
-	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR)
 
-.PHONY: all clean
+.PHONY: all clean directories
