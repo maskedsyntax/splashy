@@ -1,9 +1,9 @@
 <div align="center">
   <img width="256" height="256" alt="splashy-wobg" src="https://github.com/user-attachments/assets/740e9b85-354e-43db-9175-cc4e5a73f9c6" />  
   
-  <h1>Splashy</h1> 
+  <h1>Splashy (C Version)</h1> 
   
-  **Splashy** is a lightweight and feature-rich whiteboard application for Linux, built with **GTK3** and **Cairo**.  
+  **Splashy** is a lightweight and feature-rich whiteboard application for Linux, rewritten in **C** using **GTK3** and **Cairo** for maximum performance and responsiveness.
   It is designed for quick sketches, diagrams, and personal drawing needs.
 </div>
 
@@ -12,9 +12,12 @@
 ## Features
 
 ### Current
+- **High Performance:** Native C implementation for low latency.
+- **Stylus Support:** Pressure sensitivity support for Wacom and other styluses.
+- **Smooth Drawing:** Advanced input smoothing algorithms for fluid lines.
 - Freehand drawing with variable brush size.
 - Eraser tool with adjustable size.
-- Shape tools: `Line`, `Rectangle`, `Circle`
+- Shape tools: `Line`, `Rectangle`, `Circle`.
 - Color palette with a wide selection of preset colors.
 - Custom color picker for both drawing and background.
 - Clear canvas with a single click.
@@ -32,21 +35,23 @@
 
 ### Requirements
 Ensure you have the following installed:
-- `Python`
-- `PyGObject (gi)`
-- `Cairo`
+- `GCC` (Compiler)
+- `Make`
+- `GTK+ 3.0` development headers
+- `Cairo` development headers
 
 On Debian/Ubuntu-based systems, install dependencies with:
 ```bash
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0
+sudo apt install build-essential libgtk-3-dev libcairo2-dev
 ```
 
-### Run the App
-Clone the repository and run the app:
+### Build and Run
+Clone the repository and build the app:
 ```bash
 git clone https://github.com/maskedsyntax/splashy
 cd splashy
-python3 splashy.py
+make
+./splashy_c
 ```
 
 ---
@@ -60,4 +65,3 @@ Contributions are welcome! Fork the repo, create a branch, and open a pull reque
 ## License
 
 This project is licensed under the [**MIT License**](./LICENSE).
-
