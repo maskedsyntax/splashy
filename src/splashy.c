@@ -711,24 +711,17 @@ static void on_tool_toggled(GtkToggleButton *btn, gpointer user_data) {
     }
 }
 
-static void on_page_type_toggled(GtkToggleButton *btn, gpointer user_data) {
-    (void)user_data;
-    if (gtk_toggle_button_get_active(btn)) {
-        AppState *app = (AppState *)g_object_get_data(G_OBJECT(btn), "app_ptr");
-        PageType type = (PageType)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "page_type"));
-        app->current_page_type = type;
-        gtk_widget_queue_draw(app->drawing_area);
-    }
+static void on_page_combo_changed(GtkComboBox *widget, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    app->current_page_type = (PageType)gtk_combo_box_get_active(widget);
+    gtk_widget_queue_draw(app->drawing_area);
 }
 
-static void on_layer_toggled(GtkToggleButton *btn, gpointer user_data) {
-    (void)user_data;
-    if (gtk_toggle_button_get_active(btn)) {
-        AppState *app = (AppState *)g_object_get_data(G_OBJECT(btn), "app_ptr");
-        int layer_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "layer_idx"));
-        app->current_layer = layer_idx;
-        app->surface = app->layers[layer_idx];
-    }
+static void on_layer_combo_changed(GtkComboBox *widget, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    int layer_idx = gtk_combo_box_get_active(widget);
+    app->current_layer = layer_idx;
+    app->surface = app->layers[layer_idx];
 }
 
 static void on_brush_size_changed(GtkRange *range, gpointer user_data) {
@@ -875,80 +868,72 @@ static GtkWidget* create_color_button(AppState *app, double r, double g, double 
 }
 
 static GtkWidget* create_sidebar(AppState *app) {
+    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scrolled, 220, -1);
+
     GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_size_request(sidebar, 200, -1);
     g_object_set(sidebar, "margin", 10, NULL);
+    gtk_container_add(GTK_CONTAINER(scrolled), sidebar);
 
     // Tools
     GtkWidget *tools_frame = gtk_frame_new("Tools");
-    GtkWidget *tools_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(tools_box, "margin", 10, NULL);
+    GtkWidget *tools_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(tools_grid), 2);
+    gtk_grid_set_column_spacing(GTK_GRID(tools_grid), 2);
+    g_object_set(tools_grid, "margin", 5, NULL);
     
-    const char *tool_names[] = {"Pen", "Eraser", "Line", "Rectangle", "Circle", "Arrow", "Text"};
+    const char *tool_names[] = {"Pen", "Eraser", "Line", "Rect", "Circ", "Arrow", "Text"};
     for (int i = 0; i < 7; i++) {
         GtkWidget *btn = gtk_toggle_button_new_with_label(tool_names[i]);
         g_object_set_data(G_OBJECT(btn), "app_ptr", app);
         g_object_set_data(G_OBJECT(btn), "tool_id", GINT_TO_POINTER(i));
         g_signal_connect(btn, "toggled", G_CALLBACK(on_tool_toggled), NULL);
-        gtk_box_pack_start(GTK_BOX(tools_box), btn, FALSE, FALSE, 0);
+        gtk_grid_attach(GTK_GRID(tools_grid), btn, i % 2, i / 2, 1, 1);
         app->tool_buttons[i] = btn;
     }
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[0]), TRUE); // Pen active
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[0]), TRUE);
     
-    gtk_container_add(GTK_CONTAINER(tools_frame), tools_box);
+    gtk_container_add(GTK_CONTAINER(tools_frame), tools_grid);
     gtk_box_pack_start(GTK_BOX(sidebar), tools_frame, FALSE, FALSE, 0);
 
-    // Page Style
-    GtkWidget *page_frame = gtk_frame_new("Page Style");
-    GtkWidget *page_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(page_box, "margin", 10, NULL);
+    // Page Style & Layers (Combined for space)
+    GtkWidget *style_frame = gtk_frame_new("Page & Layers");
+    GtkWidget *style_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    g_object_set(style_box, "margin", 5, NULL);
 
-    const char *page_names[] = {"Plain", "Grid", "Lined", "Dotted"};
-    GSList *group = NULL;
-    for (int i = 0; i < 4; i++) {
-        GtkWidget *btn = gtk_radio_button_new_with_label(group, page_names[i]);
-        group = gtk_radio_button_get_group(GTK_RADIO_BUTTON(btn));
-        g_object_set_data(G_OBJECT(btn), "app_ptr", app);
-        g_object_set_data(G_OBJECT(btn), "page_type", GINT_TO_POINTER(i));
-        g_signal_connect(btn, "toggled", G_CALLBACK(on_page_type_toggled), NULL);
-        gtk_box_pack_start(GTK_BOX(page_box), btn, FALSE, FALSE, 0);
-        if (i == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
-    }
-    gtk_container_add(GTK_CONTAINER(page_frame), page_box);
-    gtk_box_pack_start(GTK_BOX(sidebar), page_frame, FALSE, FALSE, 0);
+    GtkWidget *page_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(page_combo), "Plain Page");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(page_combo), "Grid Page");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(page_combo), "Lined Page");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(page_combo), "Dotted Page");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(page_combo), 0);
+    g_signal_connect(page_combo, "changed", G_CALLBACK(on_page_combo_changed), app);
+    gtk_box_pack_start(GTK_BOX(style_box), page_combo, FALSE, FALSE, 0);
 
-    // Layers
-    GtkWidget *layer_frame = gtk_frame_new("Layers");
-    GtkWidget *layer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(layer_box, "margin", 10, NULL);
+    GtkWidget *layer_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(layer_combo), "Background Layer");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(layer_combo), "Foreground Layer");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(layer_combo), 1);
+    g_signal_connect(layer_combo, "changed", G_CALLBACK(on_layer_combo_changed), app);
+    gtk_box_pack_start(GTK_BOX(style_box), layer_combo, FALSE, FALSE, 0);
 
-    const char *layer_names[] = {"Background Layer", "Foreground Layer"};
-    GSList *l_group = NULL;
-    for (int i = 0; i < 2; i++) {
-        GtkWidget *btn = gtk_radio_button_new_with_label(l_group, layer_names[i]);
-        l_group = gtk_radio_button_get_group(GTK_RADIO_BUTTON(btn));
-        g_object_set_data(G_OBJECT(btn), "app_ptr", app);
-        g_object_set_data(G_OBJECT(btn), "layer_idx", GINT_TO_POINTER(i));
-        g_signal_connect(btn, "toggled", G_CALLBACK(on_layer_toggled), NULL);
-        gtk_box_pack_start(GTK_BOX(layer_box), btn, FALSE, FALSE, 0);
-        if (i == 1) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE); // Default to foreground
-    }
-    gtk_container_add(GTK_CONTAINER(layer_frame), layer_box);
-    gtk_box_pack_start(GTK_BOX(sidebar), layer_frame, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(style_frame), style_box);
+    gtk_box_pack_start(GTK_BOX(sidebar), style_frame, FALSE, FALSE, 0);
 
     // Brush Size
-    GtkWidget *brush_frame = gtk_frame_new("Brush Size");
-    GtkWidget *brush_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(brush_box, "margin", 10, NULL);
+    GtkWidget *brush_frame = gtk_frame_new("Sizes");
+    GtkWidget *brush_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    g_object_set(brush_box, "margin", 5, NULL);
     
-    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Pen Size"), FALSE, FALSE, 0);
-    app->brush_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 20, 1);
+    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Brush"), FALSE, FALSE, 0);
+    app->brush_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 50, 1);
     gtk_range_set_value(GTK_RANGE(app->brush_scale), app->brush_size);
     g_signal_connect(app->brush_scale, "value-changed", G_CALLBACK(on_brush_size_changed), app);
     gtk_box_pack_start(GTK_BOX(brush_box), app->brush_scale, FALSE, FALSE, 0);
     
-    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Eraser Size"), FALSE, FALSE, 0);
-    app->eraser_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 5, 50, 5);
+    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Eraser"), FALSE, FALSE, 0);
+    app->eraser_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 5, 100, 5);
     gtk_range_set_value(GTK_RANGE(app->eraser_scale), app->eraser_size);
     g_signal_connect(app->eraser_scale, "value-changed", G_CALLBACK(on_eraser_size_changed), app);
     gtk_box_pack_start(GTK_BOX(brush_box), app->eraser_scale, FALSE, FALSE, 0);
@@ -959,79 +944,66 @@ static GtkWidget* create_sidebar(AppState *app) {
     // Colors
     GtkWidget *colors_frame = gtk_frame_new("Colors");
     GtkWidget *colors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(colors_box, "margin", 10, NULL);
+    g_object_set(colors_box, "margin", 5, NULL);
     
     GtkWidget *grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 2);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 2);
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 1);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 1);
     
-    // Palette data (simplified from Python)
     double palette[][4] = {
-        {0,0,0,1}, {0.4,0.4,0.4,1}, {0.6,0.6,0.6,1}, {1,1,1,1},
-        {1,0,0,1}, {0.8,0,0,1}, {0.6,0,0,1}, {1,0.4,0.4,1},
-        {0,0,1,1}, {0,0,0.8,1}, {0,0,0.6,1}, {0.4,0.4,1,1},
-        {0,0.8,0,1}, {0,0.6,0,1}, {0,0.4,0,1}, {0.4,1,0.4,1},
-        {1,1,0,1}, {1,0.8,0,1}, {1,0.6,0,1}, {1,0.4,0,1},
-        {0.8,0,0.8,1}, {0.6,0,0.6,1}, {1,0.4,1,1}, {0.8,0.4,0.8,1}
+        {0,0,0,1}, {0.4,0.4,0.4,1}, {0.7,0.7,0.7,1}, {1,1,1,1},
+        {1,0,0,1}, {0,0.7,0,1}, {0,0,1,1}, {1,1,0,1},
+        {1,0.5,0,1}, {0.5,0,0.5,1}, {0,1,1,1}, {0.6,0.3,0,1}
     };
     
-    int row = 0, col = 0;
+    int r = 0, c = 0;
     for (unsigned long i = 0; i < sizeof(palette)/sizeof(palette[0]); i++) {
         GtkWidget *btn = create_color_button(app, palette[i][0], palette[i][1], palette[i][2], palette[i][3]);
-        gtk_grid_attach(GTK_GRID(grid), btn, col, row, 1, 1);
-        col++;
-        if (col >= 4) { col = 0; row++; }
+        gtk_grid_attach(GTK_GRID(grid), btn, c, r, 1, 1);
+        c++; if (c >= 4) { c = 0; r++; }
     }
-    
     gtk_box_pack_start(GTK_BOX(colors_box), grid, FALSE, FALSE, 0);
     
-    GtkWidget *custom_btn = gtk_button_new_with_label("Custom Color...");
+    GtkWidget *color_btns_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *custom_btn = gtk_button_new_with_label("Pen...");
     g_signal_connect(custom_btn, "clicked", G_CALLBACK(on_custom_color_clicked), app);
-    gtk_box_pack_start(GTK_BOX(colors_box), custom_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(color_btns_box), custom_btn, TRUE, TRUE, 0);
+
+    GtkWidget *bg_btn = gtk_button_new_with_label("BG...");
+    g_signal_connect(bg_btn, "clicked", G_CALLBACK(on_background_color_clicked), app);
+    gtk_box_pack_start(GTK_BOX(color_btns_box), bg_btn, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(colors_box), color_btns_box, FALSE, FALSE, 0);
     
     gtk_container_add(GTK_CONTAINER(colors_frame), colors_box);
     gtk_box_pack_start(GTK_BOX(sidebar), colors_frame, FALSE, FALSE, 0);
 
-    // Background
-    GtkWidget *bg_frame = gtk_frame_new("Background");
-    GtkWidget *bg_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(bg_box, "margin", 10, NULL);
-    
-    GtkWidget *bg_btn = gtk_button_new_with_label("Background Color...");
-    g_signal_connect(bg_btn, "clicked", G_CALLBACK(on_background_color_clicked), app);
-    gtk_box_pack_start(GTK_BOX(bg_box), bg_btn, FALSE, FALSE, 0);
-    
-    gtk_container_add(GTK_CONTAINER(bg_frame), bg_box);
-    gtk_box_pack_start(GTK_BOX(sidebar), bg_frame, FALSE, FALSE, 0);
-
     // Actions
     GtkWidget *act_frame = gtk_frame_new("Actions");
     GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    g_object_set(act_box, "margin", 10, NULL);
+    g_object_set(act_box, "margin", 5, NULL);
     
-    GtkWidget *undo_redo_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    GtkWidget *undo_btn = gtk_button_new_with_label("↩️ Undo");
+    GtkWidget *undo_redo_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *undo_btn = gtk_button_new_with_label("Undo");
     g_signal_connect(undo_btn, "clicked", G_CALLBACK(on_undo_clicked), app);
     gtk_box_pack_start(GTK_BOX(undo_redo_box), undo_btn, TRUE, TRUE, 0);
 
-    GtkWidget *redo_btn = gtk_button_new_with_label("↪️ Redo");
+    GtkWidget *redo_btn = gtk_button_new_with_label("Redo");
     g_signal_connect(redo_btn, "clicked", G_CALLBACK(on_redo_clicked), app);
     gtk_box_pack_start(GTK_BOX(undo_redo_box), redo_btn, TRUE, TRUE, 0);
-    
     gtk_box_pack_start(GTK_BOX(act_box), undo_redo_box, FALSE, FALSE, 0);
 
-    GtkWidget *save_btn = gtk_button_new_with_label("💾 Save Canvas");
+    GtkWidget *save_btn = gtk_button_new_with_label("💾 Save");
     g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_clicked), app);
     gtk_box_pack_start(GTK_BOX(act_box), save_btn, FALSE, FALSE, 0);
 
-    GtkWidget *clr_btn = gtk_button_new_with_label("🗑️ Clear Canvas");
+    GtkWidget *clr_btn = gtk_button_new_with_label("🗑️ Clear");
     g_signal_connect(clr_btn, "clicked", G_CALLBACK(on_clear_clicked), app);
     gtk_box_pack_start(GTK_BOX(act_box), clr_btn, FALSE, FALSE, 0);
     
     gtk_container_add(GTK_CONTAINER(act_frame), act_box);
     gtk_box_pack_start(GTK_BOX(sidebar), act_frame, FALSE, FALSE, 0);
 
-    return sidebar;
+    return scrolled;
 }
 
 // --- Main ---
