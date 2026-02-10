@@ -10,10 +10,14 @@ typedef enum {
     TOOL_ERASER,
     TOOL_LINE,
     TOOL_RECTANGLE,
-    TOOL_CIRCLE
+    TOOL_CIRCLE,
+    TOOL_ARROW,
+    TOOL_TEXT
 } ToolType;
 
 // --- Data Structures ---
+
+#define MAX_UNDO 20
 
 typedef struct {
     double r, g, b, a;
@@ -31,11 +35,16 @@ typedef struct {
     // UI References
     GtkWidget *brush_scale;
     GtkWidget *eraser_scale;
-    GtkWidget *tool_buttons[5]; // Indexed by ToolType
+    GtkWidget *tool_buttons[7]; // Indexed by ToolType
 
     // Cairo Surfaces
     cairo_surface_t *surface;      // Main drawing surface
     cairo_surface_t *temp_surface; // Preview surface for shapes
+
+    // Undo/Redo History
+    cairo_surface_t *undo_stack[MAX_UNDO];
+    int history_index; // points to current state
+    int history_max;   // points to the top of available redo states
 
     // State
     ToolType current_tool;
@@ -60,6 +69,80 @@ typedef struct {
 // --- Forward Declarations ---
 
 static void clear_surface(cairo_surface_t *surface, Color col);
+static void save_history(AppState *app);
+
+// --- History Management ---
+
+static void save_history(AppState *app) {
+    if (!app->surface) return;
+
+    // If we have redo states, they are now invalidated
+    for (int i = app->history_index + 1; i <= app->history_max && i < MAX_UNDO; i++) {
+        if (app->undo_stack[i]) {
+            cairo_surface_destroy(app->undo_stack[i]);
+            app->undo_stack[i] = NULL;
+        }
+    }
+
+    // Shift stack if full
+    if (app->history_index == MAX_UNDO - 1) {
+        if (app->undo_stack[0]) cairo_surface_destroy(app->undo_stack[0]);
+        for (int i = 0; i < MAX_UNDO - 1; i++) {
+            app->undo_stack[i] = app->undo_stack[i+1];
+        }
+        app->history_index--;
+    }
+
+    app->history_index++;
+    int w = cairo_image_surface_get_width(app->surface);
+    int h = cairo_image_surface_get_height(app->surface);
+    app->undo_stack[app->history_index] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    
+    cairo_t *cr = cairo_create(app->undo_stack[app->history_index]);
+    cairo_set_source_surface(cr, app->surface, 0, 0);
+    cairo_paint(cr);
+    cairo_destroy(cr);
+
+    app->history_max = app->history_index;
+}
+
+static void undo(AppState *app) {
+    if (app->history_index > 0) {
+        app->history_index--;
+        
+        cairo_t *cr = cairo_create(app->surface);
+        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_surface(cr, app->undo_stack[app->history_index], 0, 0);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        
+        gtk_widget_queue_draw(app->drawing_area);
+    }
+}
+
+static void redo(AppState *app) {
+    if (app->history_index < app->history_max) {
+        app->history_index++;
+        
+        cairo_t *cr = cairo_create(app->surface);
+        cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_surface(cr, app->undo_stack[app->history_index], 0, 0);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        
+        gtk_widget_queue_draw(app->drawing_area);
+    }
+}
+
+static void on_undo_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    undo((AppState *)user_data);
+}
+
+static void on_redo_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    redo((AppState *)user_data);
+}
 
 // --- Helper Functions ---
 
@@ -69,7 +152,7 @@ static Color make_color(double r, double g, double b, double a) {
 }
 
 static void update_tool_buttons(AppState *app) {
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         if ((ToolType)i == app->current_tool) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[i]), TRUE);
         } else {
@@ -91,6 +174,9 @@ static void ensure_surface(AppState *app, int width, int height) {
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
         cairo_paint(cr);
         cairo_destroy(cr);
+
+        // Initial state
+        save_history(app);
         return;
     }
 
@@ -215,6 +301,9 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
         }
         
         Point p = {event->x, event->y, pressure};
+
+        // Save history before we start drawing
+        save_history(app);
         
         if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
             // Start smoothing buffer
@@ -239,6 +328,31 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
             cairo_stroke(cr);
             cairo_destroy(cr);
             gtk_widget_queue_draw(widget);
+        } else if (app->current_tool == TOOL_TEXT) {
+            GtkWidget *dialog = gtk_dialog_new_with_buttons("Enter Text", GTK_WINDOW(app->window),
+                                                            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                                            "_OK", GTK_RESPONSE_OK,
+                                                            "_Cancel", GTK_RESPONSE_CANCEL, NULL);
+            GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+            GtkWidget *entry = gtk_entry_new();
+            gtk_container_add(GTK_CONTAINER(content_area), entry);
+            gtk_widget_show_all(dialog);
+
+            if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
+                const char *text = gtk_entry_get_text(GTK_ENTRY(entry));
+                if (text && strlen(text) > 0) {
+                    cairo_t *cr = cairo_create(app->surface);
+                    cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
+                    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+                    cairo_set_font_size(cr, app->brush_size * 5.0); // Font size relative to brush size
+                    cairo_move_to(cr, event->x, event->y);
+                    cairo_show_text(cr, text);
+                    cairo_destroy(cr);
+                    gtk_widget_queue_draw(widget);
+                }
+            }
+            gtk_widget_destroy(dialog);
+            app->drawing = FALSE; // Don't start a drag for text
         } else {
             // Shape tools
             app->start_point = p;
@@ -246,6 +360,22 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
         }
     }
     return TRUE;
+}
+
+static void draw_arrow(cairo_t *cr, double x1, double y1, double x2, double y2) {
+    cairo_move_to(cr, x1, y1);
+    cairo_line_to(cr, x2, y2);
+    cairo_stroke(cr);
+
+    double angle = atan2(y2 - y1, x2 - x1);
+    double arrow_len = 15;
+    double arrow_angle = M_PI / 6;
+
+    cairo_move_to(cr, x2, y2);
+    cairo_line_to(cr, x2 - arrow_len * cos(angle - arrow_angle), y2 - arrow_len * sin(angle - arrow_angle));
+    cairo_move_to(cr, x2, y2);
+    cairo_line_to(cr, x2 - arrow_len * cos(angle + arrow_angle), y2 - arrow_len * sin(angle + arrow_angle));
+    cairo_stroke(cr);
 }
 
 static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data) {
@@ -328,6 +458,8 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
+            } else if (app->current_tool == TOOL_ARROW) {
+                draw_arrow(cr, app->start_point.x, app->start_point.y, x, y);
             }
             cairo_destroy(cr);
             gtk_widget_queue_draw(widget);
@@ -398,6 +530,8 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
+            } else if (app->current_tool == TOOL_ARROW) {
+                draw_arrow(cr, app->start_point.x, app->start_point.y, x, y);
             }
             cairo_destroy(cr);
         }
@@ -510,6 +644,7 @@ static void on_save_clicked(GtkButton *btn, gpointer user_data) {
 static void on_clear_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
+    save_history(app);
     clear_surface(app->surface, app->background_color);
     gtk_widget_queue_draw(app->drawing_area);
 }
@@ -551,8 +686,8 @@ static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *tools_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     g_object_set(tools_box, "margin", 10, NULL);
     
-    const char *tool_names[] = {"Pen", "Eraser", "Line", "Rectangle", "Circle"};
-    for (int i = 0; i < 5; i++) {
+    const char *tool_names[] = {"Pen", "Eraser", "Line", "Rectangle", "Circle", "Arrow", "Text"};
+    for (int i = 0; i < 7; i++) {
         GtkWidget *btn = gtk_toggle_button_new_with_label(tool_names[i]);
         g_object_set_data(G_OBJECT(btn), "app_ptr", app);
         g_object_set_data(G_OBJECT(btn), "tool_id", GINT_TO_POINTER(i));
@@ -638,6 +773,17 @@ static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     g_object_set(act_box, "margin", 10, NULL);
     
+    GtkWidget *undo_redo_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    GtkWidget *undo_btn = gtk_button_new_with_label("↩️ Undo");
+    g_signal_connect(undo_btn, "clicked", G_CALLBACK(on_undo_clicked), app);
+    gtk_box_pack_start(GTK_BOX(undo_redo_box), undo_btn, TRUE, TRUE, 0);
+
+    GtkWidget *redo_btn = gtk_button_new_with_label("↪️ Redo");
+    g_signal_connect(redo_btn, "clicked", G_CALLBACK(on_redo_clicked), app);
+    gtk_box_pack_start(GTK_BOX(undo_redo_box), redo_btn, TRUE, TRUE, 0);
+    
+    gtk_box_pack_start(GTK_BOX(act_box), undo_redo_box, FALSE, FALSE, 0);
+
     GtkWidget *save_btn = gtk_button_new_with_label("💾 Save Canvas");
     g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_clicked), app);
     gtk_box_pack_start(GTK_BOX(act_box), save_btn, FALSE, FALSE, 0);
@@ -668,6 +814,9 @@ int main(int argc, char *argv[]) {
     app->temp_surface = NULL;
     app->drawing = FALSE;
     app->point_count = 0;
+    app->history_index = -1;
+    app->history_max = -1;
+    for (int i = 0; i < MAX_UNDO; i++) app->undo_stack[i] = NULL;
 
     // Window
     app->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
