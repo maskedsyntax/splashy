@@ -28,6 +28,13 @@ typedef struct {
     double pressure;
 } Point;
 
+typedef enum {
+    PAGE_PLAIN,
+    PAGE_GRID,
+    PAGE_LINED,
+    PAGE_DOTTED
+} PageType;
+
 typedef struct {
     GtkWidget *window;
     GtkWidget *drawing_area;
@@ -38,7 +45,9 @@ typedef struct {
     GtkWidget *tool_buttons[7]; // Indexed by ToolType
 
     // Cairo Surfaces
-    cairo_surface_t *surface;      // Main drawing surface
+    cairo_surface_t *layers[2];    // 0: Background, 1: Foreground
+    int current_layer;
+    cairo_surface_t *surface;      // Points to layers[current_layer]
     cairo_surface_t *temp_surface; // Preview surface for shapes
 
     // Undo/Redo History
@@ -48,11 +57,18 @@ typedef struct {
 
     // State
     ToolType current_tool;
+    PageType current_page_type;
     Color current_color;
     Color background_color;
     double brush_size;
     double eraser_size;
     gboolean drawing;
+    
+    // Canvas Transformation
+    double offset_x, offset_y;
+    double scale;
+    gboolean panning;
+    double last_pan_x, last_pan_y;
 
     // Input State
     Point start_point; // For shapes
@@ -163,10 +179,14 @@ static void update_tool_buttons(AppState *app) {
 
 // --- Drawing Logic ---
 
-static void ensure_surface(AppState *app, int width, int height) {
-    if (!app->surface) {
-        app->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-        clear_surface(app->surface, app->background_color);
+static void ensure_surface(AppState *app, int width, int height, double dx, double dy) {
+    if (!app->layers[0]) {
+        app->layers[0] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+        app->layers[1] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+        clear_surface(app->layers[0], app->background_color);
+        clear_surface(app->layers[1], app->background_color);
+        
+        app->surface = app->layers[app->current_layer];
         
         app->temp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
         // temp surface should be transparent initially
@@ -180,28 +200,31 @@ static void ensure_surface(AppState *app, int width, int height) {
         return;
     }
 
-    int old_w = cairo_image_surface_get_width(app->surface);
-    int old_h = cairo_image_surface_get_height(app->surface);
+    int old_w = cairo_image_surface_get_width(app->layers[0]);
+    int old_h = cairo_image_surface_get_height(app->layers[0]);
 
-    if (width > old_w || height > old_h) {
+    if (width > old_w || height > old_h || dx > 0 || dy > 0) {
         int new_w = (width > old_w) ? width : old_w;
         int new_h = (height > old_h) ? height : old_h;
 
-        cairo_surface_t *new_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, new_w, new_h);
-        clear_surface(new_surf, app->background_color);
+        for (int i = 0; i < 2; i++) {
+            cairo_surface_t *new_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, new_w, new_h);
+            clear_surface(new_surf, app->background_color);
 
-        cairo_t *cr = cairo_create(new_surf);
-        cairo_set_source_surface(cr, app->surface, 0, 0);
-        cairo_paint(cr);
-        cairo_destroy(cr);
+            cairo_t *cr = cairo_create(new_surf);
+            cairo_set_source_surface(cr, app->layers[i], dx, dy);
+            cairo_paint(cr);
+            cairo_destroy(cr);
 
-        cairo_surface_destroy(app->surface);
-        app->surface = new_surf;
+            cairo_surface_destroy(app->layers[i]);
+            app->layers[i] = new_surf;
+        }
+        app->surface = app->layers[app->current_layer];
 
         // Resize temp surface too
         cairo_surface_destroy(app->temp_surface);
         app->temp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, new_w, new_h);
-        cr = cairo_create(app->temp_surface);
+        cairo_t *cr = cairo_create(app->temp_surface);
         cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
         cairo_paint(cr);
         cairo_destroy(cr);
@@ -209,9 +232,9 @@ static void ensure_surface(AppState *app, int width, int height) {
 }
 
 static void clear_surface(cairo_surface_t *surface, Color col) {
+    (void)col;
     cairo_t *cr = cairo_create(surface);
-    cairo_set_source_rgba(cr, col.r, col.g, col.b, col.a);
-    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     cairo_destroy(cr);
 }
@@ -258,21 +281,84 @@ static void draw_smooth_segment(AppState *app, cairo_t *cr) {
 }
 
 
+static void draw_background_pattern(AppState *app, cairo_t *cr, int w, int h) {
+    // Fill the visible screen with background color
+    // Since cr is already translated/scaled, we need to know the visible bounds in world coords
+    double v_x1 = -app->offset_x / app->scale;
+    double v_y1 = -app->offset_y / app->scale;
+    double v_x2 = v_x1 + w / app->scale;
+    double v_y2 = v_y1 + h / app->scale;
+
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
+    cairo_rectangle(cr, v_x1, v_y1, v_x2 - v_x1, v_y2 - v_y1);
+    cairo_fill(cr);
+    cairo_restore(cr);
+
+    if (app->current_page_type == PAGE_PLAIN) return;
+
+    cairo_set_source_rgba(cr, 0.8, 0.8, 0.8, 0.5);
+    cairo_set_line_width(cr, 0.5 / app->scale); // Keep line width constant on screen
+
+    double step = 30.0;
+    double start_x = floor(v_x1 / step) * step;
+    double start_y = floor(v_y1 / step) * step;
+
+    if (app->current_page_type == PAGE_GRID) {
+        for (double x = start_x; x <= v_x2; x += step) {
+            cairo_move_to(cr, x, v_y1);
+            cairo_line_to(cr, x, v_y2);
+        }
+        for (double y = start_y; y <= v_y2; y += step) {
+            cairo_move_to(cr, v_x1, y);
+            cairo_line_to(cr, v_x2, y);
+        }
+        cairo_stroke(cr);
+    } else if (app->current_page_type == PAGE_LINED) {
+        for (double y = start_y; y <= v_y2; y += step) {
+            cairo_move_to(cr, v_x1, y);
+            cairo_line_to(cr, v_x2, y);
+        }
+        cairo_stroke(cr);
+    } else if (app->current_page_type == PAGE_DOTTED) {
+        for (double x = start_x; x < v_x2; x += step) {
+            for (double y = start_y; y < v_y2; y += step) {
+                cairo_arc(cr, x, y, 1.0 / app->scale, 0, 2 * M_PI);
+                cairo_fill(cr);
+            }
+        }
+    }
+}
+
 // --- Event Callbacks ---
 
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     AppState *app = (AppState *)user_data;
-    (void)widget;
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(widget, &allocation);
 
-    if (app->surface) {
-        cairo_set_source_surface(cr, app->surface, 0, 0);
-        cairo_paint(cr);
+    // Background pattern is NOT transformed (stays fixed to screen)
+    // Actually, usually whiteboard grids should pan WITH the drawing.
+    // Let's transform it too.
+    
+    cairo_save(cr);
+    cairo_translate(cr, app->offset_x, app->offset_y);
+    cairo_scale(cr, app->scale, app->scale);
+
+    draw_background_pattern(app, cr, allocation.width / app->scale + 200, allocation.height / app->scale + 200); // Draw enough to cover
+
+    for (int i = 0; i < 2; i++) {
+        if (app->layers[i]) {
+            cairo_set_source_surface(cr, app->layers[i], 0, 0);
+            cairo_paint(cr);
+        }
     }
     
     if (app->temp_surface) {
         cairo_set_source_surface(cr, app->temp_surface, 0, 0);
         cairo_paint(cr);
     }
+    cairo_restore(cr);
 
     return FALSE;
 }
@@ -280,16 +366,50 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 static gboolean on_configure(GtkWidget *widget, GdkEventConfigure *event, gpointer user_data) {
     (void)widget;
     AppState *app = (AppState *)user_data;
-    ensure_surface(app, event->width, event->height);
+    ensure_surface(app, event->width, event->height, 0, 0);
+    return TRUE;
+}
+
+static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    double zoom_factor = 1.1;
+    if (event->direction == GDK_SCROLL_DOWN) zoom_factor = 1.0 / 1.1;
+    else if (event->direction == GDK_SCROLL_UP) zoom_factor = 1.1;
+    else if (event->direction == GDK_SCROLL_SMOOTH) {
+        double delta_x, delta_y;
+        gdk_event_get_scroll_deltas((GdkEvent*)event, &delta_x, &delta_y);
+        if (delta_y > 0) zoom_factor = 1.0 / 1.1;
+        else zoom_factor = 1.1;
+    }
+
+    app->scale *= zoom_factor;
+    
+    // Zoom towards mouse position
+    // New offset should satisfy: (mouse_x - new_offset) / new_scale = (mouse_x - old_offset) / old_scale
+    app->offset_x = event->x - (event->x - app->offset_x) * zoom_factor;
+    app->offset_y = event->y - (event->y - app->offset_y) * zoom_factor;
+
+    gtk_widget_queue_draw(widget);
     return TRUE;
 }
 
 static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     
+    if (event->button == GDK_BUTTON_MIDDLE) {
+        app->panning = TRUE;
+        app->last_pan_x = event->x;
+        app->last_pan_y = event->y;
+        return TRUE;
+    }
+
     if (event->button == GDK_BUTTON_PRIMARY) {
         app->drawing = TRUE;
         
+        // Transform screen coords to world coords
+        double wx = (event->x - app->offset_x) / app->scale;
+        double wy = (event->y - app->offset_y) / app->scale;
+
         // Handle Pressure
         double pressure = 1.0;
         GdkDevice *device = gdk_event_get_device((GdkEvent*)event);
@@ -300,7 +420,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
              }
         }
         
-        Point p = {event->x, event->y, pressure};
+        Point p = {wx, wy, pressure};
 
         // Save history before we start drawing
         save_history(app);
@@ -314,7 +434,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
             cairo_t *cr = cairo_create(app->surface);
             if (app->current_tool == TOOL_PEN) {
                 cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
-                // Adjust size by pressure slightly? Maybe not for initial dot to avoid blobs.
+                // Adjust size by pressure slightly
                 cairo_set_line_width(cr, app->brush_size * pressure);
             } else {
                 cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
@@ -323,8 +443,8 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
             cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
             cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
             
-            cairo_move_to(cr, event->x, event->y);
-            cairo_line_to(cr, event->x, event->y);
+            cairo_move_to(cr, wx, wy);
+            cairo_line_to(cr, wx, wy);
             cairo_stroke(cr);
             cairo_destroy(cr);
             gtk_widget_queue_draw(widget);
@@ -345,7 +465,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
                     cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
                     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
                     cairo_set_font_size(cr, app->brush_size * 5.0); // Font size relative to brush size
-                    cairo_move_to(cr, event->x, event->y);
+                    cairo_move_to(cr, wx, wy);
                     cairo_show_text(cr, text);
                     cairo_destroy(cr);
                     gtk_widget_queue_draw(widget);
@@ -381,23 +501,56 @@ static void draw_arrow(cairo_t *cr, double x1, double y1, double x2, double y2) 
 static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     
-    if (app->drawing && app->surface) {
-        // Get pressure
-        double pressure = 1.0;
-        double x = event->x;
-        double y = event->y;
+    if (app->panning) {
+        app->offset_x += (event->x - app->last_pan_x);
+        app->offset_y += (event->y - app->last_pan_y);
+        app->last_pan_x = event->x;
+        app->last_pan_y = event->y;
+        gtk_widget_queue_draw(widget);
+        return TRUE;
+    }
 
-        // Hint handling is needed if we enabled hint mask, but we didn't explicitly.
-        // If we want high res input, we should check GdkEvent structure directly.
-        
-        gdk_event_request_motions(event); // Ask for more events
-        
+    if (app->drawing && app->surface) {
+        // Transform to world coords
+        double wx = (event->x - app->offset_x) / app->scale;
+        double wy = (event->y - app->offset_y) / app->scale;
+
+        // Dynamic expansion
+        int sw = cairo_image_surface_get_width(app->layers[0]);
+        int sh = cairo_image_surface_get_height(app->layers[0]);
+        if (wx < 50 || wy < 50 || wx > sw - 50 || wy > sh - 50) {
+            int new_w = sw, new_h = sh;
+            double dx = 0, dy = 0;
+            if (wx < 50) { new_w += 1000; dx = 1000; }
+            if (wy < 50) { new_h += 1000; dy = 1000; }
+            if (wx > sw - 50) new_w += 1000;
+            if (wy > sh - 50) new_h += 1000;
+
+            ensure_surface(app, new_w, new_h, dx, dy);
+            
+            if (dx > 0 || dy > 0) {
+                 // Adjust internal points and start_point
+                 app->start_point.x += dx; app->start_point.y += dy;
+                 for (int i=0; i<app->point_count; i++) { app->points[i].x += dx; app->points[i].y += dy; }
+                 
+                 // Adjust view offset so it doesn't jump
+                 app->offset_x -= dx * app->scale;
+                 app->offset_y -= dy * app->scale;
+                 
+                 // Re-transform wx, wy
+                 wx = (event->x - app->offset_x) / app->scale;
+                 wy = (event->y - app->offset_y) / app->scale;
+            }
+        }
+
+        double pressure = 1.0;
+        gdk_event_request_motions(event);
         double p_val;
         if (gdk_event_get_axis((GdkEvent*)event, GDK_AXIS_PRESSURE, &p_val)) {
             pressure = p_val;
         }
 
-        Point curr = {x, y, pressure};
+        Point curr = {wx, wy, pressure};
 
         if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
             // Add to buffer
@@ -447,19 +600,19 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
             
             if (app->current_tool == TOOL_LINE) {
                 cairo_move_to(cr, app->start_point.x, app->start_point.y);
-                cairo_line_to(cr, x, y);
+                cairo_line_to(cr, wx, wy);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_RECTANGLE) {
-                cairo_rectangle(cr, app->start_point.x, app->start_point.y, x - app->start_point.x, y - app->start_point.y);
+                cairo_rectangle(cr, app->start_point.x, app->start_point.y, wx - app->start_point.x, wy - app->start_point.y);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_CIRCLE) {
-                double dx = x - app->start_point.x;
-                double dy = y - app->start_point.y;
+                double dx = wx - app->start_point.x;
+                double dy = wy - app->start_point.y;
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_ARROW) {
-                draw_arrow(cr, app->start_point.x, app->start_point.y, x, y);
+                draw_arrow(cr, app->start_point.x, app->start_point.y, wx, wy);
             }
             cairo_destroy(cr);
             gtk_widget_queue_draw(widget);
@@ -471,13 +624,19 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
 static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     
+    if (event->button == GDK_BUTTON_MIDDLE) {
+        app->panning = FALSE;
+        return TRUE;
+    }
+
     if (event->button == GDK_BUTTON_PRIMARY && app->drawing) {
         app->drawing = FALSE;
 
+        double wx = (event->x - app->offset_x) / app->scale;
+        double wy = (event->y - app->offset_y) / app->scale;
+
         if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
              // Finish the line if there are remaining points
-             // For simple smoothing, we just leave the last segment as is or connect to the very last point.
-             // Connecting to the last point (event->x/y) ensures the line ends exactly where user let go.
              cairo_t *cr = cairo_create(app->surface);
              if (app->current_tool == TOOL_PEN) {
                 cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
@@ -490,7 +649,6 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
              cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
              
              // Draw remaining
-             // If we have points in buffer, connect the last "midpoint" to the final point.
              if (app->point_count >= 2) {
                  Point p_last = app->points[app->point_count-1];
                  Point p_prev = app->points[app->point_count-2];
@@ -498,12 +656,11 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
                  double mid_y = (p_prev.y + p_last.y) / 2.0;
                  
                  cairo_move_to(cr, mid_x, mid_y);
-                 cairo_line_to(cr, event->x, event->y);
+                 cairo_line_to(cr, wx, wy);
                  cairo_stroke(cr);
              } else if (app->point_count == 1) {
-                 // Just a line to end
                  cairo_move_to(cr, app->points[0].x, app->points[0].y);
-                 cairo_line_to(cr, event->x, event->y);
+                 cairo_line_to(cr, wx, wy);
                  cairo_stroke(cr);
              }
              cairo_destroy(cr);
@@ -514,24 +671,21 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
             cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
             cairo_set_line_width(cr, app->brush_size);
 
-            double x = event->x;
-            double y = event->y;
-
             if (app->current_tool == TOOL_LINE) {
                 cairo_move_to(cr, app->start_point.x, app->start_point.y);
-                cairo_line_to(cr, x, y);
+                cairo_line_to(cr, wx, wy);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_RECTANGLE) {
-                cairo_rectangle(cr, app->start_point.x, app->start_point.y, x - app->start_point.x, y - app->start_point.y);
+                cairo_rectangle(cr, app->start_point.x, app->start_point.y, wx - app->start_point.x, wy - app->start_point.y);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_CIRCLE) {
-                double dx = x - app->start_point.x;
-                double dy = y - app->start_point.y;
+                double dx = wx - app->start_point.x;
+                double dy = wy - app->start_point.y;
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
             } else if (app->current_tool == TOOL_ARROW) {
-                draw_arrow(cr, app->start_point.x, app->start_point.y, x, y);
+                draw_arrow(cr, app->start_point.x, app->start_point.y, wx, wy);
             }
             cairo_destroy(cr);
         }
@@ -554,6 +708,26 @@ static void on_tool_toggled(GtkToggleButton *btn, gpointer user_data) {
         
         app->current_tool = tool;
         update_tool_buttons(app); // Ensure others are untoggled if manually clicked (though radio behavior works too)
+    }
+}
+
+static void on_page_type_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    if (gtk_toggle_button_get_active(btn)) {
+        AppState *app = (AppState *)g_object_get_data(G_OBJECT(btn), "app_ptr");
+        PageType type = (PageType)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "page_type"));
+        app->current_page_type = type;
+        gtk_widget_queue_draw(app->drawing_area);
+    }
+}
+
+static void on_layer_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    if (gtk_toggle_button_get_active(btn)) {
+        AppState *app = (AppState *)g_object_get_data(G_OBJECT(btn), "app_ptr");
+        int layer_idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "layer_idx"));
+        app->current_layer = layer_idx;
+        app->surface = app->layers[layer_idx];
     }
 }
 
@@ -606,6 +780,30 @@ static void on_background_color_clicked(GtkButton *btn, gpointer user_data) {
     gtk_widget_destroy(dialog);
 }
 
+static void export_canvas(AppState *app, const char *filename) {
+    if (!app->layers[0]) return;
+    
+    int w = cairo_image_surface_get_width(app->layers[0]);
+    int h = cairo_image_surface_get_height(app->layers[0]);
+    
+    cairo_surface_t *export_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_t *cr = cairo_create(export_surf);
+    
+    // Background color (solid for export)
+    cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
+    cairo_paint(cr);
+    
+    // Layers
+    for (int i = 0; i < 2; i++) {
+        cairo_set_source_surface(cr, app->layers[i], 0, 0);
+        cairo_paint(cr);
+    }
+    
+    cairo_destroy(cr);
+    cairo_surface_write_to_png(export_surf, filename);
+    cairo_surface_destroy(export_surf);
+}
+
 static void on_save_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
@@ -633,7 +831,7 @@ static void on_save_clicked(GtkButton *btn, gpointer user_data) {
         char *filename;
         filename = gtk_file_chooser_get_filename(chooser);
         
-        cairo_surface_write_to_png(app->surface, filename);
+        export_canvas(app, filename);
         
         g_free(filename);
     }
@@ -699,6 +897,44 @@ static GtkWidget* create_sidebar(AppState *app) {
     
     gtk_container_add(GTK_CONTAINER(tools_frame), tools_box);
     gtk_box_pack_start(GTK_BOX(sidebar), tools_frame, FALSE, FALSE, 0);
+
+    // Page Style
+    GtkWidget *page_frame = gtk_frame_new("Page Style");
+    GtkWidget *page_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    g_object_set(page_box, "margin", 10, NULL);
+
+    const char *page_names[] = {"Plain", "Grid", "Lined", "Dotted"};
+    GSList *group = NULL;
+    for (int i = 0; i < 4; i++) {
+        GtkWidget *btn = gtk_radio_button_new_with_label(group, page_names[i]);
+        group = gtk_radio_button_get_group(GTK_RADIO_BUTTON(btn));
+        g_object_set_data(G_OBJECT(btn), "app_ptr", app);
+        g_object_set_data(G_OBJECT(btn), "page_type", GINT_TO_POINTER(i));
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_page_type_toggled), NULL);
+        gtk_box_pack_start(GTK_BOX(page_box), btn, FALSE, FALSE, 0);
+        if (i == 0) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
+    }
+    gtk_container_add(GTK_CONTAINER(page_frame), page_box);
+    gtk_box_pack_start(GTK_BOX(sidebar), page_frame, FALSE, FALSE, 0);
+
+    // Layers
+    GtkWidget *layer_frame = gtk_frame_new("Layers");
+    GtkWidget *layer_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    g_object_set(layer_box, "margin", 10, NULL);
+
+    const char *layer_names[] = {"Background Layer", "Foreground Layer"};
+    GSList *l_group = NULL;
+    for (int i = 0; i < 2; i++) {
+        GtkWidget *btn = gtk_radio_button_new_with_label(l_group, layer_names[i]);
+        l_group = gtk_radio_button_get_group(GTK_RADIO_BUTTON(btn));
+        g_object_set_data(G_OBJECT(btn), "app_ptr", app);
+        g_object_set_data(G_OBJECT(btn), "layer_idx", GINT_TO_POINTER(i));
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_layer_toggled), NULL);
+        gtk_box_pack_start(GTK_BOX(layer_box), btn, FALSE, FALSE, 0);
+        if (i == 1) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE); // Default to foreground
+    }
+    gtk_container_add(GTK_CONTAINER(layer_frame), layer_box);
+    gtk_box_pack_start(GTK_BOX(sidebar), layer_frame, FALSE, FALSE, 0);
 
     // Brush Size
     GtkWidget *brush_frame = gtk_frame_new("Brush Size");
@@ -806,10 +1042,18 @@ int main(int argc, char *argv[]) {
     AppState *app = malloc(sizeof(AppState));
     // Defaults
     app->current_tool = TOOL_PEN;
+    app->current_page_type = PAGE_PLAIN;
     app->current_color = make_color(0, 0, 0, 1);
     app->background_color = make_color(1, 1, 1, 1);
     app->brush_size = 3.0;
     app->eraser_size = 10.0;
+    app->offset_x = 0.0;
+    app->offset_y = 0.0;
+    app->scale = 1.0;
+    app->panning = FALSE;
+    app->layers[0] = NULL;
+    app->layers[1] = NULL;
+    app->current_layer = 1;
     app->surface = NULL;
     app->temp_surface = NULL;
     app->drawing = FALSE;
@@ -831,13 +1075,15 @@ int main(int argc, char *argv[]) {
     // Drawing Area
     app->drawing_area = gtk_drawing_area_new();
     gtk_widget_set_events(app->drawing_area, 
-                          GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK);
+                          GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | 
+                          GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK);
     
     g_signal_connect(app->drawing_area, "draw", G_CALLBACK(on_draw), app);
     g_signal_connect(app->drawing_area, "configure-event", G_CALLBACK(on_configure), app);
     g_signal_connect(app->drawing_area, "button-press-event", G_CALLBACK(on_button_press), app);
     g_signal_connect(app->drawing_area, "button-release-event", G_CALLBACK(on_button_release), app);
     g_signal_connect(app->drawing_area, "motion-notify-event", G_CALLBACK(on_motion_notify), app);
+    g_signal_connect(app->drawing_area, "scroll-event", G_CALLBACK(on_scroll), app);
 
     // Sidebar
     GtkWidget *sidebar = create_sidebar(app);

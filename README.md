@@ -4,7 +4,7 @@
   <h1>Splashy (C Version)</h1> 
   
   **Splashy** is a lightweight and feature-rich whiteboard application for Linux, rewritten in **C** using **GTK3** and **Cairo** for maximum performance and responsiveness.
-  It is designed for quick sketches, diagrams, and personal drawing needs.
+  It is designed for quick sketches, diagrams, and professional handwritten notes.
 </div>
 
 ---
@@ -12,22 +12,20 @@
 ## Features
 
 ### Current
-- **High Performance:** Native C implementation for low latency.
-- **Stylus Support:** Pressure sensitivity support for Wacom and other styluses.
-- **Smooth Drawing:** Advanced input smoothing algorithms for fluid lines.
-- Freehand drawing with variable brush size.
-- Eraser tool with adjustable size.
-- Shape tools: `Line`, `Rectangle`, `Circle`.
-- Color palette with a wide selection of preset colors.
-- Custom color picker for both drawing and background.
-- Clear canvas with a single click.
-- Resizable window with persistent canvas state during resize.
+- **High Performance:** Native C implementation for ultra-low latency.
+- **Stylus Support:** Pressure sensitivity support for Wacom and other professional styluses.
+- **Smooth Drawing:** Midpoint quadratic Bézier interpolation for fluid, professional lines.
+- **Undo/Redo:** 20-step history stack for all drawing actions.
+- **Export:** Save your canvas as high-quality PNG images.
+- **Tools:** Pen, Eraser, Line, Rectangle, Circle, Arrow, and Text.
+- **Colors:** Deep color palette and custom color picker.
+- **Resizable:** Persistent canvas state during window resizing.
 
 ### Planned
-- Save & Export: Export the canvas as an image file.
-- Undo/Redo: Step through previous actions.
-- Additional shape tools (polygons, arrows, text).
-- Layer management (background vs. drawing layers).
+- **Infinite Canvas:** Horizontal and vertical scaling/panning for unlimited workspace.
+- **Page Backgrounds:** Switch between Grid, Lined, Dotted, and Plain backgrounds.
+- **Layer Management:** Background vs. drawing layers for complex illustrations.
+- **Keyboard Shortcuts:** Global hotkeys for Undo (Ctrl+Z), Redo (Ctrl+Y), Save (Ctrl+S), and Tool selection.
 
 ---
 
@@ -46,12 +44,9 @@ sudo apt install build-essential libgtk-3-dev libcairo2-dev
 ```
 
 ### Build and Run
-Clone the repository and build the app:
 ```bash
-git clone https://github.com/maskedsyntax/splashy
-cd splashy
 make
-./splashy_c
+./build/splashy
 ```
 
 ---
