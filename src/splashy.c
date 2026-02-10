@@ -931,39 +931,32 @@ static GtkWidget* create_sidebar(AppState *app) {
 
     // Colors
     GtkWidget *colors_frame = gtk_frame_new("Colors");
-    GtkWidget *colors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *colors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     g_object_set(colors_box, "margin", 5, NULL);
     
-    GtkWidget *grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 1);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 1);
-    
-    double palette[][4] = {
-        {0,0,0,1}, {0.4,0.4,0.4,1}, {0.7,0.7,0.7,1}, {1,1,1,1},
-        {1,0,0,1}, {0,0.7,0,1}, {0,0,1,1}, {1,1,0,1},
-        {1,0.5,0,1}, {0.5,0,0.5,1}, {0,1,1,1}, {0.6,0.3,0,1}
-    };
-    
-    int r = 0, c = 0;
-    for (unsigned long i = 0; i < sizeof(palette)/sizeof(palette[0]); i++) {
-        GtkWidget *btn = create_color_button(app, palette[i][0], palette[i][1], palette[i][2], palette[i][3]);
-        gtk_grid_attach(GTK_GRID(grid), btn, c, r, 1, 1);
-        c++; if (c >= 4) { c = 0; r++; }
-    }
-    gtk_box_pack_start(GTK_BOX(colors_box), grid, FALSE, FALSE, 0);
-    
+    // Custom Pickers Row
     GtkWidget *custom_grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(custom_grid), 2);
-    gtk_grid_set_column_spacing(GTK_GRID(custom_grid), 5);
+    gtk_grid_set_row_spacing(GTK_GRID(custom_grid), 5);
+    gtk_grid_set_column_spacing(GTK_GRID(custom_grid), 10);
 
-    // Pen Color Button
-    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("Pen:"), 0, 0, 1, 1);
+    // Pen Color
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("Pen"), 0, 0, 1, 1);
     GtkWidget *pen_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){0,0,0,1});
     g_signal_connect(pen_color_btn, "color-set", G_CALLBACK(on_custom_color_clicked), app);
     gtk_grid_attach(GTK_GRID(custom_grid), pen_color_btn, 1, 0, 1, 1);
 
-    // BG Color Button
-    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("BG:"), 0, 1, 1, 1);
+    // Quick Select for Pen (A small row of common colors)
+    GtkWidget *quick_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 1);
+    double quick_colors[][4] = {{0,0,0,1}, {1,0,0,1}, {0,0.7,0,1}, {0,0,1,1}, {1,1,0,1}};
+    for (int i=0; i<5; i++) {
+        GtkWidget *q_btn = create_color_button(app, quick_colors[i][0], quick_colors[i][1], quick_colors[i][2], quick_colors[i][3]);
+        gtk_widget_set_size_request(q_btn, 20, 20);
+        gtk_box_pack_start(GTK_BOX(quick_box), q_btn, FALSE, FALSE, 0);
+    }
+    gtk_grid_attach(GTK_GRID(custom_grid), quick_box, 2, 0, 1, 1);
+
+    // BG Color
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("BG"), 0, 1, 1, 1);
     GtkWidget *bg_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1,1,1,1});
     g_signal_connect(bg_color_btn, "color-set", G_CALLBACK(on_background_color_clicked), app);
     gtk_grid_attach(GTK_GRID(custom_grid), bg_color_btn, 1, 1, 1, 1);
