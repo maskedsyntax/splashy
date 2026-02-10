@@ -744,33 +744,21 @@ static void on_color_clicked(GtkButton *btn, gpointer user_data) {
     }
 }
 
-static void on_custom_color_clicked(GtkButton *btn, gpointer user_data) {
+static void on_custom_color_clicked(GtkColorButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
-    (void)btn;
-    GtkWidget *dialog = gtk_color_chooser_dialog_new("Choose Color", GTK_WINDOW(app->window));
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
-        GdkRGBA c;
-        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(dialog), &c);
-        app->current_color = make_color(c.red, c.green, c.blue, c.alpha);
-    }
-    gtk_widget_destroy(dialog);
+    GdkRGBA c;
+    gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &c);
+    app->current_color = make_color(c.red, c.green, c.blue, c.alpha);
 }
 
-static void on_background_color_clicked(GtkButton *btn, gpointer user_data) {
+static void on_background_color_clicked(GtkColorButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
-    (void)btn;
-    GtkWidget *dialog = gtk_color_chooser_dialog_new("Choose Background Color", GTK_WINDOW(app->window));
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
-        GdkRGBA c;
-        gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(dialog), &c);
-        app->background_color = make_color(c.red, c.green, c.blue, c.alpha);
-        
-        // Redraw background means clearing canvas usually, or at least repainting base.
-        // Python app clears canvas.
-        clear_surface(app->surface, app->background_color);
-        gtk_widget_queue_draw(app->drawing_area);
-    }
-    gtk_widget_destroy(dialog);
+    GdkRGBA c;
+    gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &c);
+    app->background_color = make_color(c.red, c.green, c.blue, c.alpha);
+    
+    // Redraw background
+    gtk_widget_queue_draw(app->drawing_area);
 }
 
 static void export_canvas(AppState *app, const char *filename) {
@@ -964,15 +952,23 @@ static GtkWidget* create_sidebar(AppState *app) {
     }
     gtk_box_pack_start(GTK_BOX(colors_box), grid, FALSE, FALSE, 0);
     
-    GtkWidget *color_btns_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    GtkWidget *custom_btn = gtk_button_new_with_label("Pen...");
-    g_signal_connect(custom_btn, "clicked", G_CALLBACK(on_custom_color_clicked), app);
-    gtk_box_pack_start(GTK_BOX(color_btns_box), custom_btn, TRUE, TRUE, 0);
+    GtkWidget *custom_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(custom_grid), 2);
+    gtk_grid_set_column_spacing(GTK_GRID(custom_grid), 5);
 
-    GtkWidget *bg_btn = gtk_button_new_with_label("BG...");
-    g_signal_connect(bg_btn, "clicked", G_CALLBACK(on_background_color_clicked), app);
-    gtk_box_pack_start(GTK_BOX(color_btns_box), bg_btn, TRUE, TRUE, 0);
-    gtk_box_pack_start(GTK_BOX(colors_box), color_btns_box, FALSE, FALSE, 0);
+    // Pen Color Button
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("Pen:"), 0, 0, 1, 1);
+    GtkWidget *pen_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){0,0,0,1});
+    g_signal_connect(pen_color_btn, "color-set", G_CALLBACK(on_custom_color_clicked), app);
+    gtk_grid_attach(GTK_GRID(custom_grid), pen_color_btn, 1, 0, 1, 1);
+
+    // BG Color Button
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("BG:"), 0, 1, 1, 1);
+    GtkWidget *bg_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1,1,1,1});
+    g_signal_connect(bg_color_btn, "color-set", G_CALLBACK(on_background_color_clicked), app);
+    gtk_grid_attach(GTK_GRID(custom_grid), bg_color_btn, 1, 1, 1, 1);
+
+    gtk_box_pack_start(GTK_BOX(colors_box), custom_grid, FALSE, FALSE, 0);
     
     gtk_container_add(GTK_CONTAINER(colors_frame), colors_box);
     gtk_box_pack_start(GTK_BOX(sidebar), colors_frame, FALSE, FALSE, 0);
