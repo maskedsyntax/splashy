@@ -86,6 +86,7 @@ typedef struct {
 
 static void clear_surface(cairo_surface_t *surface, Color col);
 static void save_history(AppState *app);
+static void on_save_clicked(GtkButton *btn, gpointer user_data);
 
 // --- History Management ---
 
@@ -370,24 +371,63 @@ static gboolean on_configure(GtkWidget *widget, GdkEventConfigure *event, gpoint
     return TRUE;
 }
 
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)widget;
+
+    if ((event->state & GDK_CONTROL_MASK)) {
+        switch (event->keyval) {
+            case GDK_KEY_z:
+                if (event->state & GDK_SHIFT_MASK) redo(app);
+                else undo(app);
+                return TRUE;
+            case GDK_KEY_y:
+                redo(app);
+                return TRUE;
+            case GDK_KEY_s:
+                on_save_clicked(NULL, app);
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data) {
     AppState *app = (AppState *)user_data;
-    double zoom_factor = 1.1;
-    if (event->direction == GDK_SCROLL_DOWN) zoom_factor = 1.0 / 1.1;
-    else if (event->direction == GDK_SCROLL_UP) zoom_factor = 1.1;
-    else if (event->direction == GDK_SCROLL_SMOOTH) {
-        double delta_x, delta_y;
-        gdk_event_get_scroll_deltas((GdkEvent*)event, &delta_x, &delta_y);
-        if (delta_y > 0) zoom_factor = 1.0 / 1.1;
-        else zoom_factor = 1.1;
-    }
-
-    app->scale *= zoom_factor;
     
-    // Zoom towards mouse position
-    // New offset should satisfy: (mouse_x - new_offset) / new_scale = (mouse_x - old_offset) / old_scale
-    app->offset_x = event->x - (event->x - app->offset_x) * zoom_factor;
-    app->offset_y = event->y - (event->y - app->offset_y) * zoom_factor;
+    // Check for Control key to Zoom, otherwise Pan
+    if (event->state & GDK_CONTROL_MASK) {
+        double zoom_factor = 1.1;
+        if (event->direction == GDK_SCROLL_DOWN) zoom_factor = 1.0 / 1.1;
+        else if (event->direction == GDK_SCROLL_UP) zoom_factor = 1.1;
+        else if (event->direction == GDK_SCROLL_SMOOTH) {
+            double delta_x, delta_y;
+            gdk_event_get_scroll_deltas((GdkEvent*)event, &delta_x, &delta_y);
+            if (delta_y > 0) zoom_factor = 1.0 / 1.1;
+            else zoom_factor = 1.1;
+        }
+
+        app->scale *= zoom_factor;
+        app->offset_x = event->x - (event->x - app->offset_x) * zoom_factor;
+        app->offset_y = event->y - (event->y - app->offset_y) * zoom_factor;
+    } else {
+        // Pan
+        double delta_x = 0, delta_y = 0;
+        double scroll_step = 30.0;
+        
+        if (event->direction == GDK_SCROLL_UP) delta_y = scroll_step;
+        else if (event->direction == GDK_SCROLL_DOWN) delta_y = -scroll_step;
+        else if (event->direction == GDK_SCROLL_LEFT) delta_x = scroll_step;
+        else if (event->direction == GDK_SCROLL_RIGHT) delta_x = -scroll_step;
+        else if (event->direction == GDK_SCROLL_SMOOTH) {
+            gdk_event_get_scroll_deltas((GdkEvent*)event, &delta_x, &delta_y);
+            delta_x *= -scroll_step; // Invert to feel natural
+            delta_y *= -scroll_step;
+        }
+        
+        app->offset_x += delta_x;
+        app->offset_y += delta_y;
+    }
 
     gtk_widget_queue_draw(widget);
     return TRUE;
@@ -864,26 +904,25 @@ static GtkWidget* create_sidebar(AppState *app) {
     g_object_set(sidebar, "margin", 10, NULL);
     gtk_container_add(GTK_CONTAINER(scrolled), sidebar);
 
-    // Tools
-    GtkWidget *tools_frame = gtk_frame_new("Tools");
-    GtkWidget *tools_grid = gtk_grid_new();
-    gtk_grid_set_row_spacing(GTK_GRID(tools_grid), 2);
-    gtk_grid_set_column_spacing(GTK_GRID(tools_grid), 2);
-    g_object_set(tools_grid, "margin", 5, NULL);
+    // Tools (Cleaner Look)
+    GtkWidget *tools_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(tools_box), "linked"); // Group them visually
     
-    const char *tool_names[] = {"Pen", "Eraser", "Line", "Rect", "Circ", "Arrow", "Text"};
+    const char *tool_icons[] = {"🖊️", "🧼", "📏", "⬜", "◯", "↗️", "𝐓"};
+    const char *tool_tips[] = {"Pen", "Eraser", "Line", "Rectangle", "Circle", "Arrow", "Text"};
+    
     for (int i = 0; i < 7; i++) {
-        GtkWidget *btn = gtk_toggle_button_new_with_label(tool_names[i]);
+        GtkWidget *btn = gtk_toggle_button_new_with_label(tool_icons[i]);
+        gtk_widget_set_tooltip_text(btn, tool_tips[i]);
         g_object_set_data(G_OBJECT(btn), "app_ptr", app);
         g_object_set_data(G_OBJECT(btn), "tool_id", GINT_TO_POINTER(i));
         g_signal_connect(btn, "toggled", G_CALLBACK(on_tool_toggled), NULL);
-        gtk_grid_attach(GTK_GRID(tools_grid), btn, i % 2, i / 2, 1, 1);
+        gtk_box_pack_start(GTK_BOX(tools_box), btn, TRUE, TRUE, 0);
         app->tool_buttons[i] = btn;
     }
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[0]), TRUE);
     
-    gtk_container_add(GTK_CONTAINER(tools_frame), tools_grid);
-    gtk_box_pack_start(GTK_BOX(sidebar), tools_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(sidebar), tools_box, FALSE, FALSE, 0);
 
     // Page Style & Layers (Combined for space)
     GtkWidget *style_frame = gtk_frame_new("Page & Layers");
@@ -1028,6 +1067,7 @@ int main(int argc, char *argv[]) {
     gtk_window_set_title(GTK_WINDOW(app->window), "Splashy - Advanced Whiteboard (C)");
     gtk_window_set_default_size(GTK_WINDOW(app->window), 1000, 700);
     g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
 
     // Layout
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
