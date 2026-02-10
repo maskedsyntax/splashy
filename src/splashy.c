@@ -82,11 +82,57 @@ typedef struct {
 // --- Global State (or pass via user_data) ---
 // We will pass AppState* as user_data to callbacks.
 
+// --- File Format Structures ---
+
+#define PROJECT_MAGIC "SPLASHY"
+#define PROJECT_VERSION 1
+
+typedef struct {
+    char magic[8];
+    int version;
+    int width;
+    int height;
+    int current_layer;
+    double bg_r, bg_g, bg_b, bg_a;
+    int page_type;
+    double offset_x;
+    double offset_y;
+    double scale;
+} ProjectHeader;
+
+typedef struct {
+    unsigned char *data;
+    size_t size;
+    size_t capacity;
+    size_t read_pos;
+} MemBuffer;
+
+static cairo_status_t write_to_buffer(void *closure, const unsigned char *data, unsigned int length) {
+    MemBuffer *buf = (MemBuffer *)closure;
+    if (buf->size + length > buf->capacity) {
+        buf->capacity = (buf->size + length) * 2 + 1024;
+        buf->data = realloc(buf->data, buf->capacity);
+    }
+    memcpy(buf->data + buf->size, data, length);
+    buf->size += length;
+    return CAIRO_STATUS_SUCCESS;
+}
+
+static cairo_status_t read_from_buffer(void *closure, unsigned char *data, unsigned int length) {
+    MemBuffer *buf = (MemBuffer *)closure;
+    if (buf->read_pos + length > buf->size) return CAIRO_STATUS_READ_ERROR;
+    memcpy(data, buf->data + buf->read_pos, length);
+    buf->read_pos += length;
+    return CAIRO_STATUS_SUCCESS;
+}
+
 // --- Forward Declarations ---
 
 static void clear_surface(cairo_surface_t *surface, Color col);
 static void save_history(AppState *app);
 static void on_save_clicked(GtkButton *btn, gpointer user_data);
+static void on_save_project_clicked(GtkButton *btn, gpointer user_data);
+static void on_open_clicked(GtkButton *btn, gpointer user_data);
 
 // --- History Management ---
 
@@ -385,7 +431,13 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
                 redo(app);
                 return TRUE;
             case GDK_KEY_s:
-                on_save_clicked(NULL, app);
+                on_save_project_clicked(NULL, app);
+                return TRUE;
+            case GDK_KEY_e:
+                on_save_clicked(NULL, app); // Export
+                return TRUE;
+            case GDK_KEY_o:
+                on_open_clicked(NULL, app);
                 return TRUE;
         }
     }
@@ -801,6 +853,46 @@ static void on_background_color_clicked(GtkColorButton *btn, gpointer user_data)
     gtk_widget_queue_draw(app->drawing_area);
 }
 
+static void save_project(AppState *app, const char *filename) {
+    if (!app->layers[0]) return;
+
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) return;
+
+    // Prepare Header
+    ProjectHeader header;
+    memset(&header, 0, sizeof(header));
+    strncpy(header.magic, PROJECT_MAGIC, 8);
+    header.version = PROJECT_VERSION;
+    header.width = cairo_image_surface_get_width(app->layers[0]);
+    header.height = cairo_image_surface_get_height(app->layers[0]);
+    header.current_layer = app->current_layer;
+    header.bg_r = app->background_color.r;
+    header.bg_g = app->background_color.g;
+    header.bg_b = app->background_color.b;
+    header.bg_a = app->background_color.a;
+    header.page_type = app->current_page_type;
+    header.offset_x = app->offset_x;
+    header.offset_y = app->offset_y;
+    header.scale = app->scale;
+
+    fwrite(&header, sizeof(header), 1, fp);
+
+    // Write Layers
+    for (int i = 0; i < 2; i++) {
+        MemBuffer buf = {0};
+        cairo_surface_write_to_png_stream(app->layers[i], write_to_buffer, &buf);
+        
+        uint64_t size = buf.size; // Write size first
+        fwrite(&size, sizeof(size), 1, fp);
+        fwrite(buf.data, 1, buf.size, fp);
+        
+        free(buf.data);
+    }
+
+    fclose(fp);
+}
+
 static void export_canvas(AppState *app, const char *filename) {
     if (!app->layers[0]) return;
     
@@ -825,6 +917,98 @@ static void export_canvas(AppState *app, const char *filename) {
     cairo_surface_destroy(export_surf);
 }
 
+static void load_project(AppState *app, const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) return;
+
+    ProjectHeader header;
+    if (fread(&header, sizeof(header), 1, fp) != 1) { fclose(fp); return; }
+
+    if (strncmp(header.magic, PROJECT_MAGIC, 8) != 0 || header.version != PROJECT_VERSION) {
+        // Invalid file or version mismatch
+        fclose(fp);
+        return;
+    }
+
+    // Restore App State
+    app->current_layer = header.current_layer;
+    app->background_color = make_color(header.bg_r, header.bg_g, header.bg_b, header.bg_a);
+    app->current_page_type = header.page_type;
+    app->offset_x = header.offset_x;
+    app->offset_y = header.offset_y;
+    app->scale = header.scale;
+    
+    // Re-create surfaces
+    ensure_surface(app, header.width, header.height, 0, 0); // Reset basics
+    
+    // Read Layers
+    for (int i = 0; i < 2; i++) {
+        uint64_t size;
+        if (fread(&size, sizeof(size), 1, fp) != 1) break;
+        
+        MemBuffer buf = {0};
+        buf.size = size;
+        buf.data = malloc(size);
+        if (fread(buf.data, 1, size, fp) != size) { free(buf.data); break; }
+        
+        cairo_surface_destroy(app->layers[i]);
+        app->layers[i] = cairo_image_surface_create_from_png_stream(read_from_buffer, &buf);
+        free(buf.data);
+    }
+    app->surface = app->layers[app->current_layer];
+
+    fclose(fp);
+    
+    // Clear history on load
+    app->history_index = -1;
+    app->history_max = -1;
+    save_history(app); // Save initial state of loaded project
+    
+    gtk_widget_queue_draw(app->drawing_area);
+}
+
+static void on_save_project_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)btn;
+    
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Save Project", GTK_WINDOW(app->window),
+                                                    GTK_FILE_CHOOSER_ACTION_SAVE,
+                                                    "_Cancel", GTK_RESPONSE_CANCEL,
+                                                    "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
+    gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
+    gtk_file_chooser_set_current_name(chooser, "project.sphy");
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(chooser);
+        save_project(app, filename);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_open_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)btn;
+    
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Open Project", GTK_WINDOW(app->window),
+                                                    GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                    "_Cancel", GTK_RESPONSE_CANCEL,
+                                                    "_Open", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Splashy Projects (*.sphy)");
+    gtk_file_filter_add_pattern(filter, "*.sphy");
+    gtk_file_chooser_add_filter(chooser, filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(chooser);
+        load_project(app, filename);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
 static void on_save_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
@@ -834,12 +1018,12 @@ static void on_save_clicked(GtkButton *btn, gpointer user_data) {
     GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_SAVE;
     gint res;
 
-    dialog = gtk_file_chooser_dialog_new("Save Canvas",
+    dialog = gtk_file_chooser_dialog_new("Export Image",
                                          GTK_WINDOW(app->window),
                                          action,
                                          "_Cancel",
                                          GTK_RESPONSE_CANCEL,
-                                         "_Save",
+                                         "_Export",
                                          GTK_RESPONSE_ACCEPT,
                                          NULL);
     chooser = GTK_FILE_CHOOSER(dialog);
@@ -1020,13 +1204,30 @@ static GtkWidget* create_sidebar(AppState *app) {
     gtk_box_pack_start(GTK_BOX(undo_redo_box), redo_btn, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(act_box), undo_redo_box, FALSE, FALSE, 0);
 
-    GtkWidget *save_btn = gtk_button_new_with_label("💾 Save");
-    g_signal_connect(save_btn, "clicked", G_CALLBACK(on_save_clicked), app);
-    gtk_box_pack_start(GTK_BOX(act_box), save_btn, FALSE, FALSE, 0);
+    // File Actions (Open/Save Project)
+    GtkWidget *file_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *open_btn = gtk_button_new_with_label("📂 Open");
+    g_signal_connect(open_btn, "clicked", G_CALLBACK(on_open_clicked), app);
+    gtk_box_pack_start(GTK_BOX(file_box), open_btn, TRUE, TRUE, 0);
+
+    GtkWidget *save_proj_btn = gtk_button_new_with_label("💾 Save");
+    gtk_widget_set_tooltip_text(save_proj_btn, "Save Project (.sphy)");
+    g_signal_connect(save_proj_btn, "clicked", G_CALLBACK(on_save_project_clicked), app);
+    gtk_box_pack_start(GTK_BOX(file_box), save_proj_btn, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(act_box), file_box, FALSE, FALSE, 0);
+
+    // Export & Clear
+    GtkWidget *misc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+    GtkWidget *export_btn = gtk_button_new_with_label("🖼️ Export");
+    gtk_widget_set_tooltip_text(export_btn, "Export as PNG");
+    g_signal_connect(export_btn, "clicked", G_CALLBACK(on_save_clicked), app);
+    gtk_box_pack_start(GTK_BOX(misc_box), export_btn, TRUE, TRUE, 0);
 
     GtkWidget *clr_btn = gtk_button_new_with_label("🗑️ Clear");
     g_signal_connect(clr_btn, "clicked", G_CALLBACK(on_clear_clicked), app);
-    gtk_box_pack_start(GTK_BOX(act_box), clr_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(misc_box), clr_btn, TRUE, TRUE, 0);
+    
+    gtk_box_pack_start(GTK_BOX(act_box), misc_box, FALSE, FALSE, 0);
     
     gtk_container_add(GTK_CONTAINER(act_frame), act_box);
     gtk_box_pack_start(GTK_BOX(sidebar), act_frame, FALSE, FALSE, 0);
