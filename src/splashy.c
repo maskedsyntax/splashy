@@ -1546,8 +1546,10 @@ static GtkWidget* create_color_button(AppState *app, double r, double g, double 
 static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    // Remove fixed width request, rely on internal content size or a smaller request
-    gtk_widget_set_size_request(scrolled, 160, -1);
+    // Set a consistent width and prevent horizontal expansion
+    gtk_widget_set_size_request(scrolled, 180, -1);
+    gtk_widget_set_hexpand(scrolled, FALSE);
+    gtk_widget_set_halign(scrolled, GTK_ALIGN_START);
 
     GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     g_object_set(sidebar, "margin", 8, NULL);
@@ -1772,6 +1774,13 @@ int main(int argc, char *argv[]) {
     app->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app->window), "Splashy - Advanced Whiteboard (C)");
     gtk_window_set_default_size(GTK_WINDOW(app->window), 1000, 700);
+    
+    // Set minimum window size to prevent cutting off the sidebar
+    GdkGeometry geometry;
+    geometry.min_width = 850;
+    geometry.min_height = 650;
+    gtk_window_set_geometry_hints(GTK_WINDOW(app->window), NULL, &geometry, GDK_HINT_MIN_SIZE);
+
     g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
 
