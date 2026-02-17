@@ -1,23 +1,31 @@
 #include <gtk/gtk.h>
 #include <cairo.h>
+#include <cairo-pdf.h>
 #include <math.h>
 #include <stdlib.h>
+#include <pango/pangocairo.h>
 
 // --- Constants & Enums ---
 
 typedef enum {
     TOOL_PEN,
     TOOL_ERASER,
+    TOOL_HIGHLIGHTER,
+    TOOL_BUCKET,
+    TOOL_SELECT,
     TOOL_LINE,
     TOOL_RECTANGLE,
     TOOL_CIRCLE,
+    TOOL_TRIANGLE,
+    TOOL_STAR,
     TOOL_ARROW,
-    TOOL_TEXT
+    TOOL_TEXT,
+    TOOL_COUNT
 } ToolType;
 
 // --- Data Structures ---
 
-#define MAX_UNDO 20
+#define MAX_UNDO 100
 
 typedef struct {
     double r, g, b, a;
@@ -36,19 +44,34 @@ typedef enum {
 } PageType;
 
 typedef struct {
+    cairo_surface_t *surface;
+    char *name;
+    gboolean visible;
+    double alpha;
+} Layer;
+
+typedef struct {
     GtkWidget *window;
     GtkWidget *drawing_area;
     
     // UI References
     GtkWidget *brush_scale;
     GtkWidget *eraser_scale;
-    GtkWidget *tool_buttons[7]; // Indexed by ToolType
+    GtkWidget *tool_buttons[TOOL_COUNT]; // Indexed by ToolType
+    GtkComboBoxText *layer_combo;
 
-    // Cairo Surfaces
-    cairo_surface_t *layers[2];    // 0: Background, 1: Foreground
-    int current_layer;
-    cairo_surface_t *surface;      // Points to layers[current_layer]
+    // Layers
+    GList *layer_list;
+    Layer *active_layer;
+    cairo_surface_t *surface;      // Points to active_layer->surface
     cairo_surface_t *temp_surface; // Preview surface for shapes
+
+    // Selection State
+    cairo_surface_t *selection_surf;
+    double sel_x, sel_y, sel_w, sel_h;
+    gboolean has_selection;
+    gboolean dragging_selection;
+    double sel_drag_offset_x, sel_drag_offset_y;
 
     // Undo/Redo History
     cairo_surface_t *undo_stack[MAX_UNDO];
@@ -62,6 +85,9 @@ typedef struct {
     Color background_color;
     double brush_size;
     double eraser_size;
+    char *font_name;
+    gboolean snap_to_grid;
+    gboolean dark_mode;
     gboolean drawing;
     
     // Canvas Transformation
@@ -92,7 +118,8 @@ typedef struct {
     int version;
     int width;
     int height;
-    int current_layer;
+    int layer_count;
+    int active_layer_index;
     double bg_r, bg_g, bg_b, bg_a;
     int page_type;
     double offset_x;
@@ -129,6 +156,7 @@ static cairo_status_t read_from_buffer(void *closure, unsigned char *data, unsig
 // --- Forward Declarations ---
 
 static void clear_surface(cairo_surface_t *surface, Color col);
+static void clear_temp_surface(AppState *app);
 static void save_history(AppState *app);
 static void on_save_clicked(GtkButton *btn, gpointer user_data);
 static void on_save_project_clicked(GtkButton *btn, gpointer user_data);
@@ -214,8 +242,16 @@ static Color make_color(double r, double g, double b, double a) {
     return c;
 }
 
+static void apply_snap(AppState *app, double *x, double *y) {
+    if (app->snap_to_grid && (app->current_page_type == PAGE_GRID || app->current_page_type == PAGE_DOTTED)) {
+        double step = 30.0;
+        *x = round(*x / step) * step;
+        *y = round(*y / step) * step;
+    }
+}
+
 static void update_tool_buttons(AppState *app) {
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < TOOL_COUNT; i++) {
         if ((ToolType)i == app->current_tool) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[i]), TRUE);
         } else {
@@ -224,57 +260,114 @@ static void update_tool_buttons(AppState *app) {
     }
 }
 
+// --- Flood Fill Algorithm ---
+
+typedef struct {
+    int x, y;
+} IntPoint;
+
+static void flood_fill(cairo_surface_t *surface, int start_x, int start_y, Color fill_color) {
+    if (cairo_image_surface_get_format(surface) != CAIRO_FORMAT_ARGB32) return;
+
+    int width = cairo_image_surface_get_width(surface);
+    int height = cairo_image_surface_get_height(surface);
+    int stride = cairo_image_surface_get_stride(surface);
+    unsigned char *data = cairo_image_surface_get_data(surface);
+
+    cairo_surface_flush(surface);
+
+    if (start_x < 0 || start_x >= width || start_y < 0 || start_y >= height) return;
+
+    uint32_t *pixels = (uint32_t *)data;
+    int p_stride = stride / 4;
+    uint32_t target_pixel = pixels[start_y * p_stride + start_x];
+
+    // Convert Color to uint32_t (premultiplied ARGB32)
+    unsigned char a = (unsigned char)(fill_color.a * 255);
+    unsigned char r = (unsigned char)(fill_color.r * fill_color.a * 255);
+    unsigned char g = (unsigned char)(fill_color.g * fill_color.a * 255);
+    unsigned char b = (unsigned char)(fill_color.b * fill_color.a * 255);
+    uint32_t fill_pixel = (a << 24) | (r << 16) | (g << 8) | b;
+
+    if (target_pixel == fill_pixel) return;
+
+    IntPoint *queue = malloc(sizeof(IntPoint) * width * height);
+    if (!queue) return;
+    int head = 0, tail = 0;
+
+    queue[tail++] = (IntPoint){start_x, start_y};
+    pixels[start_y * p_stride + start_x] = fill_pixel;
+
+    while (head < tail) {
+        IntPoint p = queue[head++];
+        
+        static const int dx[] = {1, -1, 0, 0};
+        static const int dy[] = {0, 0, 1, -1};
+        
+        for (int i = 0; i < 4; i++) {
+            int nx = p.x + dx[i];
+            int ny = p.y + dy[i];
+            
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                if (pixels[ny * p_stride + nx] == target_pixel) {
+                    pixels[ny * p_stride + nx] = fill_pixel;
+                    queue[tail++] = (IntPoint){nx, ny};
+                }
+            }
+        }
+    }
+    free(queue);
+    cairo_surface_mark_dirty(surface);
+}
+
 // --- Drawing Logic ---
 
 static void ensure_surface(AppState *app, int width, int height, double dx, double dy) {
-    if (!app->layers[0]) {
-        app->layers[0] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-        app->layers[1] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-        clear_surface(app->layers[0], app->background_color);
-        clear_surface(app->layers[1], app->background_color);
-        
-        app->surface = app->layers[app->current_layer];
+    if (!app->layer_list) {
+        // Create initial layer
+        Layer *l = malloc(sizeof(Layer));
+        l->name = g_strdup("Layer 1");
+        l->visible = TRUE;
+        l->alpha = 1.0;
+        l->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+        clear_surface(l->surface, app->background_color);
+        app->layer_list = g_list_append(NULL, l);
+        app->active_layer = l;
+        app->surface = l->surface;
         
         app->temp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-        // temp surface should be transparent initially
-        cairo_t *cr = cairo_create(app->temp_surface);
-        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-        cairo_paint(cr);
-        cairo_destroy(cr);
+        clear_temp_surface(app);
 
-        // Initial state
         save_history(app);
         return;
     }
 
-    int old_w = cairo_image_surface_get_width(app->layers[0]);
-    int old_h = cairo_image_surface_get_height(app->layers[0]);
+    Layer *first_layer = (Layer *)app->layer_list->data;
+    int old_w = cairo_image_surface_get_width(first_layer->surface);
+    int old_h = cairo_image_surface_get_height(first_layer->surface);
 
     if (width > old_w || height > old_h || dx > 0 || dy > 0) {
         int new_w = (width > old_w) ? width : old_w;
         int new_h = (height > old_h) ? height : old_h;
 
-        for (int i = 0; i < 2; i++) {
+        for (GList *l = app->layer_list; l != NULL; l = l->next) {
+            Layer *layer = (Layer *)l->data;
             cairo_surface_t *new_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, new_w, new_h);
             clear_surface(new_surf, app->background_color);
 
             cairo_t *cr = cairo_create(new_surf);
-            cairo_set_source_surface(cr, app->layers[i], dx, dy);
+            cairo_set_source_surface(cr, layer->surface, dx, dy);
             cairo_paint(cr);
             cairo_destroy(cr);
 
-            cairo_surface_destroy(app->layers[i]);
-            app->layers[i] = new_surf;
+            cairo_surface_destroy(layer->surface);
+            layer->surface = new_surf;
         }
-        app->surface = app->layers[app->current_layer];
+        app->surface = app->active_layer->surface;
 
-        // Resize temp surface too
         cairo_surface_destroy(app->temp_surface);
         app->temp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, new_w, new_h);
-        cairo_t *cr = cairo_create(app->temp_surface);
-        cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-        cairo_paint(cr);
-        cairo_destroy(cr);
+        clear_temp_surface(app);
     }
 }
 
@@ -394,11 +487,22 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
     draw_background_pattern(app, cr, allocation.width / app->scale + 200, allocation.height / app->scale + 200); // Draw enough to cover
 
-    for (int i = 0; i < 2; i++) {
-        if (app->layers[i]) {
-            cairo_set_source_surface(cr, app->layers[i], 0, 0);
-            cairo_paint(cr);
+    for (GList *l = app->layer_list; l != NULL; l = l->next) {
+        Layer *layer = (Layer *)l->data;
+        if (layer->visible && layer->surface) {
+            cairo_set_source_surface(cr, layer->surface, 0, 0);
+            cairo_paint_with_alpha(cr, layer->alpha);
         }
+    }
+    
+    if (app->has_selection && app->selection_surf) {
+        cairo_set_source_surface(cr, app->selection_surf, app->sel_x, app->sel_y);
+        cairo_paint(cr);
+        
+        cairo_set_source_rgba(cr, 0, 0, 1, 0.8);
+        cairo_set_line_width(cr, 1.0 / app->scale);
+        cairo_rectangle(cr, app->sel_x, app->sel_y, app->sel_w, app->sel_h);
+        cairo_stroke(cr);
     }
     
     if (app->temp_surface) {
@@ -502,6 +606,10 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
         double wx = (event->x - app->offset_x) / app->scale;
         double wy = (event->y - app->offset_y) / app->scale;
 
+        if (app->current_tool != TOOL_PEN && app->current_tool != TOOL_ERASER && app->current_tool != TOOL_HIGHLIGHTER) {
+            apply_snap(app, &wx, &wy);
+        }
+
         // Handle Pressure
         double pressure = 1.0;
         GdkDevice *device = gdk_event_get_device((GdkEvent*)event);
@@ -517,17 +625,54 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
         // Save history before we start drawing
         save_history(app);
         
-        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
+        if (app->current_tool == TOOL_SELECT) {
+            if (app->has_selection && 
+                wx >= app->sel_x && wx <= app->sel_x + app->sel_w &&
+                wy >= app->sel_y && wy <= app->sel_y + app->sel_h) {
+                app->dragging_selection = TRUE;
+                app->sel_drag_offset_x = wx - app->sel_x;
+                app->sel_drag_offset_y = wy - app->sel_y;
+            } else {
+                if (app->has_selection) {
+                    cairo_t *cr = cairo_create(app->surface);
+                    cairo_set_source_surface(cr, app->selection_surf, app->sel_x, app->sel_y);
+                    cairo_paint(cr);
+                    cairo_destroy(cr);
+                    app->has_selection = FALSE;
+                    cairo_surface_destroy(app->selection_surf);
+                    app->selection_surf = NULL;
+                }
+                app->start_point = p;
+                app->drawing = TRUE;
+            }
+            return TRUE;
+        }
+
+        if (app->current_tool == TOOL_BUCKET) {
+            flood_fill(app->surface, (int)wx, (int)wy, app->current_color);
+            gtk_widget_queue_draw(widget);
+            app->drawing = FALSE;
+            return TRUE;
+        }
+
+        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER || app->current_tool == TOOL_HIGHLIGHTER) {
             // Start smoothing buffer
             app->point_count = 1;
             app->points[0] = p;
             
             // Draw a dot for the initial press
             cairo_t *cr = cairo_create(app->surface);
-            if (app->current_tool == TOOL_PEN) {
-                cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
-                // Adjust size by pressure slightly
-                cairo_set_line_width(cr, app->brush_size * pressure);
+            if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_HIGHLIGHTER) {
+                double a = app->current_color.a;
+                double size = app->brush_size;
+                if (app->current_tool == TOOL_HIGHLIGHTER) {
+                    a *= 0.35; 
+                    size *= 4.0;
+                } else {
+                    size *= pressure;
+                }
+                cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, a);
+                cairo_set_line_width(cr, size);
             } else {
                 cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
                 cairo_set_line_width(cr, app->eraser_size);
@@ -555,10 +700,17 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
                 if (text && strlen(text) > 0) {
                     cairo_t *cr = cairo_create(app->surface);
                     cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
-                    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-                    cairo_set_font_size(cr, app->brush_size * 5.0); // Font size relative to brush size
+                    
+                    PangoLayout *layout = pango_cairo_create_layout(cr);
+                    PangoFontDescription *desc = pango_font_description_from_string(app->font_name);
+                    pango_layout_set_font_description(layout, desc);
+                    pango_layout_set_text(layout, text, -1);
+                    
                     cairo_move_to(cr, wx, wy);
-                    cairo_show_text(cr, text);
+                    pango_cairo_show_layout(cr, layout);
+                    
+                    pango_font_description_free(desc);
+                    g_object_unref(layout);
                     cairo_destroy(cr);
                     gtk_widget_queue_draw(widget);
                 }
@@ -590,6 +742,37 @@ static void draw_arrow(cairo_t *cr, double x1, double y1, double x2, double y2) 
     cairo_stroke(cr);
 }
 
+static void draw_triangle(cairo_t *cr, double x1, double y1, double x2, double y2) {
+    double mx = (x1 + x2) / 2.0;
+    cairo_move_to(cr, mx, y1);
+    cairo_line_to(cr, x1, y2);
+    cairo_line_to(cr, x2, y2);
+    cairo_close_path(cr);
+    cairo_stroke(cr);
+}
+
+static void draw_star(cairo_t *cr, double x1, double y1, double x2, double y2) {
+    double cx = (x1 + x2) / 2.0;
+    double cy = (y1 + y2) / 2.0;
+    double dx = x2 - cx;
+    double dy = y2 - cy;
+    double r_outer = sqrt(dx*dx + dy*dy);
+    double r_inner = r_outer * 0.4;
+    int points = 5;
+    double angle_step = M_PI / points;
+    
+    for (int i = 0; i < 2 * points; i++) {
+        double r = (i % 2 == 0) ? r_outer : r_inner;
+        double a = i * angle_step - M_PI / 2.0;
+        double px = cx + r * cos(a);
+        double py = cy + r * sin(a);
+        if (i == 0) cairo_move_to(cr, px, py);
+        else cairo_line_to(cr, px, py);
+    }
+    cairo_close_path(cr);
+    cairo_stroke(cr);
+}
+
 static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     
@@ -607,9 +790,34 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
         double wx = (event->x - app->offset_x) / app->scale;
         double wy = (event->y - app->offset_y) / app->scale;
 
+        if (app->current_tool != TOOL_PEN && app->current_tool != TOOL_ERASER && app->current_tool != TOOL_HIGHLIGHTER) {
+            apply_snap(app, &wx, &wy);
+        }
+
+        if (app->current_tool == TOOL_SELECT) {
+            if (app->dragging_selection) {
+                app->sel_x = wx - app->sel_drag_offset_x;
+                app->sel_y = wy - app->sel_drag_offset_y;
+                gtk_widget_queue_draw(widget);
+            } else if (app->drawing) {
+                clear_temp_surface(app);
+                cairo_t *cr = cairo_create(app->temp_surface);
+                cairo_set_source_rgba(cr, 0, 0, 1, 0.5); 
+                cairo_set_line_width(cr, 1.0);
+                double dashes[] = {4.0, 4.0};
+                cairo_set_dash(cr, dashes, 2, 0);
+                cairo_rectangle(cr, app->start_point.x, app->start_point.y, wx - app->start_point.x, wy - app->start_point.y);
+                cairo_stroke(cr);
+                cairo_destroy(cr);
+                gtk_widget_queue_draw(widget);
+            }
+            return TRUE;
+        }
+
         // Dynamic expansion
-        int sw = cairo_image_surface_get_width(app->layers[0]);
-        int sh = cairo_image_surface_get_height(app->layers[0]);
+        Layer *first = (Layer *)app->layer_list->data;
+        int sw = cairo_image_surface_get_width(first->surface);
+        int sh = cairo_image_surface_get_height(first->surface);
         if (wx < 50 || wy < 50 || wx > sw - 50 || wy > sh - 50) {
             int new_w = sw, new_h = sh;
             double dx = 0, dy = 0;
@@ -644,7 +852,7 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
 
         Point curr = {wx, wy, pressure};
 
-        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
+        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER || app->current_tool == TOOL_HIGHLIGHTER) {
             // Add to buffer
             if (app->point_count < 4) {
                 app->points[app->point_count++] = curr;
@@ -660,14 +868,19 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
             if (app->point_count >= 3) {
                 cairo_t *cr = cairo_create(app->surface);
                 
-                if (app->current_tool == TOOL_PEN) {
-                    cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
-                    // Use average pressure of segment for width
-                    double avg_p = (app->points[1].pressure + app->points[2].pressure) / 2.0;
-                    // Clamp pressure effect to be subtle if needed, or full range. 
-                    // Let's go full range but ensure min width.
-                    double width = app->brush_size * avg_p;
-                    if (width < 1.0) width = 1.0;
+                if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_HIGHLIGHTER) {
+                    double a = app->current_color.a;
+                    double width = app->brush_size;
+                    
+                    if (app->current_tool == TOOL_HIGHLIGHTER) {
+                        a *= 0.35;
+                        width *= 4.0;
+                    } else {
+                        double avg_p = (app->points[1].pressure + app->points[2].pressure) / 2.0;
+                        width *= avg_p;
+                        if (width < 1.0) width = 1.0;
+                    }
+                    cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, a);
                     cairo_set_line_width(cr, width);
                 } else {
                     cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
@@ -703,6 +916,10 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
+            } else if (app->current_tool == TOOL_TRIANGLE) {
+                draw_triangle(cr, app->start_point.x, app->start_point.y, wx, wy);
+            } else if (app->current_tool == TOOL_STAR) {
+                draw_star(cr, app->start_point.x, app->start_point.y, wx, wy);
             } else if (app->current_tool == TOOL_ARROW) {
                 draw_arrow(cr, app->start_point.x, app->start_point.y, wx, wy);
             }
@@ -722,17 +939,66 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
     }
 
     if (event->button == GDK_BUTTON_PRIMARY && app->drawing) {
-        app->drawing = FALSE;
-
         double wx = (event->x - app->offset_x) / app->scale;
         double wy = (event->y - app->offset_y) / app->scale;
 
-        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER) {
+        if (app->current_tool != TOOL_PEN && app->current_tool != TOOL_ERASER && app->current_tool != TOOL_HIGHLIGHTER) {
+            apply_snap(app, &wx, &wy);
+        }
+
+        if (app->current_tool == TOOL_SELECT) {
+            if (app->dragging_selection) {
+                app->dragging_selection = FALSE;
+            } else if (app->drawing) {
+                app->drawing = FALSE;
+                clear_temp_surface(app);
+                
+                double x1 = app->start_point.x;
+                double y1 = app->start_point.y;
+                double x2 = wx;
+                double y2 = wy;
+                
+                app->sel_x = (x1 < x2) ? x1 : x2;
+                app->sel_y = (y1 < y2) ? y1 : y2;
+                app->sel_w = fabs(x2 - x1);
+                app->sel_h = fabs(y2 - y1);
+                
+                if (app->sel_w > 1 && app->sel_h > 1) {
+                    app->selection_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, (int)app->sel_w, (int)app->sel_h);
+                    cairo_t *cr = cairo_create(app->selection_surf);
+                    cairo_set_source_surface(cr, app->surface, -app->sel_x, -app->sel_y);
+                    cairo_paint(cr);
+                    cairo_destroy(cr);
+                    
+                    cr = cairo_create(app->surface);
+                    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+                    cairo_rectangle(cr, app->sel_x, app->sel_y, app->sel_w, app->sel_h);
+                    cairo_fill(cr);
+                    cairo_destroy(cr);
+                    
+                    app->has_selection = TRUE;
+                }
+                gtk_widget_queue_draw(widget);
+            }
+            return TRUE;
+        }
+
+        app->drawing = FALSE;
+
+        if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER || app->current_tool == TOOL_HIGHLIGHTER) {
              // Finish the line if there are remaining points
              cairo_t *cr = cairo_create(app->surface);
-             if (app->current_tool == TOOL_PEN) {
-                cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, app->current_color.a);
-                cairo_set_line_width(cr, app->brush_size * (app->point_count > 0 ? app->points[app->point_count-1].pressure : 1.0));
+             if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_HIGHLIGHTER) {
+                double a = app->current_color.a;
+                double size = app->brush_size;
+                if (app->current_tool == TOOL_HIGHLIGHTER) {
+                    a *= 0.35;
+                    size *= 4.0;
+                } else {
+                    size *= (app->point_count > 0 ? app->points[app->point_count-1].pressure : 1.0);
+                }
+                cairo_set_source_rgba(cr, app->current_color.r, app->current_color.g, app->current_color.b, a);
+                cairo_set_line_width(cr, size);
              } else {
                 cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
                 cairo_set_line_width(cr, app->eraser_size);
@@ -776,6 +1042,10 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
                 double r = sqrt(dx*dx + dy*dy);
                 cairo_arc(cr, app->start_point.x, app->start_point.y, r, 0, 2 * M_PI);
                 cairo_stroke(cr);
+            } else if (app->current_tool == TOOL_TRIANGLE) {
+                draw_triangle(cr, app->start_point.x, app->start_point.y, wx, wy);
+            } else if (app->current_tool == TOOL_STAR) {
+                draw_star(cr, app->start_point.x, app->start_point.y, wx, wy);
             } else if (app->current_tool == TOOL_ARROW) {
                 draw_arrow(cr, app->start_point.x, app->start_point.y, wx, wy);
             }
@@ -792,12 +1062,23 @@ static void on_tool_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
     if (gtk_toggle_button_get_active(btn)) {
         // Find which tool this is
-        // We stored the tool index in the widget data or just deduce it?
-        // Let's pass the index via pointer to int or something. 
-        // Simpler: check equality of widget pointer
         AppState *app = (AppState *)g_object_get_data(G_OBJECT(btn), "app_ptr");
         ToolType tool = (ToolType)GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "tool_id"));
         
+        // If we switched away from select tool, commit selection
+        if (app->current_tool == TOOL_SELECT && tool != TOOL_SELECT && app->has_selection) {
+             cairo_t *cr = cairo_create(app->surface);
+             cairo_set_source_surface(cr, app->selection_surf, app->sel_x, app->sel_y);
+             cairo_paint(cr);
+             cairo_destroy(cr);
+             app->has_selection = FALSE;
+             if (app->selection_surf) {
+                 cairo_surface_destroy(app->selection_surf);
+                 app->selection_surf = NULL;
+             }
+             gtk_widget_queue_draw(app->drawing_area);
+        }
+
         app->current_tool = tool;
         update_tool_buttons(app); // Ensure others are untoggled if manually clicked (though radio behavior works too)
     }
@@ -812,8 +1093,36 @@ static void on_page_combo_changed(GtkComboBox *widget, gpointer user_data) {
 static void on_layer_combo_changed(GtkComboBox *widget, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     int layer_idx = gtk_combo_box_get_active(widget);
-    app->current_layer = layer_idx;
-    app->surface = app->layers[layer_idx];
+    if (layer_idx < 0) return;
+    
+    Layer *l = (Layer *)g_list_nth_data(app->layer_list, layer_idx);
+    if (l) {
+        app->active_layer = l;
+        app->surface = l->surface;
+    }
+}
+
+static void on_add_layer_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)btn;
+    
+    Layer *first = (Layer *)app->layer_list->data;
+    int w = cairo_image_surface_get_width(first->surface);
+    int h = cairo_image_surface_get_height(first->surface);
+    
+    Layer *l = malloc(sizeof(Layer));
+    l->name = g_strdup_printf("Layer %d", g_list_length(app->layer_list) + 1);
+    l->visible = TRUE;
+    l->alpha = 1.0;
+    l->surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    clear_surface(l->surface, app->background_color);
+    
+    app->layer_list = g_list_append(app->layer_list, l);
+    
+    gtk_combo_box_text_append_text(app->layer_combo, l->name);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(app->layer_combo), g_list_length(app->layer_list) - 1);
+    
+    gtk_widget_queue_draw(app->drawing_area);
 }
 
 static void on_brush_size_changed(GtkRange *range, gpointer user_data) {
@@ -824,6 +1133,81 @@ static void on_brush_size_changed(GtkRange *range, gpointer user_data) {
 static void on_eraser_size_changed(GtkRange *range, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     app->eraser_size = gtk_range_get_value(range);
+}
+
+static void on_font_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    GtkWidget *dialog = gtk_font_chooser_dialog_new("Select Font", GTK_WINDOW(app->window));
+    gtk_font_chooser_set_font(GTK_FONT_CHOOSER(dialog), app->font_name);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_OK) {
+        g_free(app->font_name);
+        app->font_name = gtk_font_chooser_get_font(GTK_FONT_CHOOSER(dialog));
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_snap_toggled(GtkToggleButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    app->snap_to_grid = gtk_toggle_button_get_active(btn);
+}
+
+static void invert_layers(AppState *app) {
+    for (GList *l = app->layer_list; l != NULL; l = l->next) {
+        Layer *layer = (Layer *)l->data;
+        if (!layer->surface) continue;
+
+        int width = cairo_image_surface_get_width(layer->surface);
+        int height = cairo_image_surface_get_height(layer->surface);
+        int stride = cairo_image_surface_get_stride(layer->surface);
+        unsigned char *data = cairo_image_surface_get_data(layer->surface);
+
+        cairo_surface_flush(layer->surface);
+        
+        for (int y = 0; y < height; y++) {
+            uint32_t *row = (uint32_t *)(data + y * stride);
+            for (int x = 0; x < width; x++) {
+                uint32_t p = row[x];
+                unsigned char a = (p >> 24) & 0xFF;
+                if (a == 0) continue; // Skip fully transparent
+
+                unsigned char r = (p >> 16) & 0xFF;
+                unsigned char g = (p >> 8) & 0xFF;
+                unsigned char b = p & 0xFF;
+
+                // Simple inversion for light/dark transition
+                // Black (0,0,0) -> White (255,255,255) and vice versa
+                row[x] = (a << 24) | ((255 - r) << 16) | ((255 - g) << 8) | (255 - b);
+            }
+        }
+        cairo_surface_mark_dirty(layer->surface);
+    }
+}
+
+static void on_dark_mode_toggled(GtkToggleButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    gboolean is_dark = gtk_toggle_button_get_active(btn);
+    if (app->dark_mode == is_dark) return;
+
+    app->dark_mode = is_dark;
+    
+    // Invert existing drawings
+    invert_layers(app);
+
+    if (app->dark_mode) {
+        app->background_color = make_color(0.1, 0.1, 0.1, 1);
+        // Only change current pen color if it's the default black
+        if (app->current_color.r == 0 && app->current_color.g == 0 && app->current_color.b == 0) {
+            app->current_color = make_color(1, 1, 1, 1);
+        }
+    } else {
+        app->background_color = make_color(1, 1, 1, 1);
+        // Only change current pen color if it's the default white
+        if (app->current_color.r == 1 && app->current_color.g == 1 && app->current_color.b == 1) {
+            app->current_color = make_color(0, 0, 0, 1);
+        }
+    }
+    gtk_widget_queue_draw(app->drawing_area);
 }
 
 static void on_color_clicked(GtkButton *btn, gpointer user_data) {
@@ -854,19 +1238,22 @@ static void on_background_color_clicked(GtkColorButton *btn, gpointer user_data)
 }
 
 static void save_project(AppState *app, const char *filename) {
-    if (!app->layers[0]) return;
+    if (!app->layer_list) return;
 
     FILE *fp = fopen(filename, "wb");
     if (!fp) return;
 
+    Layer *first = (Layer *)app->layer_list->data;
+    
     // Prepare Header
     ProjectHeader header;
     memset(&header, 0, sizeof(header));
     strncpy(header.magic, PROJECT_MAGIC, 8);
     header.version = PROJECT_VERSION;
-    header.width = cairo_image_surface_get_width(app->layers[0]);
-    header.height = cairo_image_surface_get_height(app->layers[0]);
-    header.current_layer = app->current_layer;
+    header.width = cairo_image_surface_get_width(first->surface);
+    header.height = cairo_image_surface_get_height(first->surface);
+    header.layer_count = g_list_length(app->layer_list);
+    header.active_layer_index = g_list_index(app->layer_list, app->active_layer);
     header.bg_r = app->background_color.r;
     header.bg_g = app->background_color.g;
     header.bg_b = app->background_color.b;
@@ -879,9 +1266,10 @@ static void save_project(AppState *app, const char *filename) {
     fwrite(&header, sizeof(header), 1, fp);
 
     // Write Layers
-    for (int i = 0; i < 2; i++) {
+    for (GList *l = app->layer_list; l != NULL; l = l->next) {
+        Layer *layer = (Layer *)l->data;
         MemBuffer buf = {0};
-        cairo_surface_write_to_png_stream(app->layers[i], write_to_buffer, &buf);
+        cairo_surface_write_to_png_stream(layer->surface, write_to_buffer, &buf);
         
         uint64_t size = buf.size; // Write size first
         fwrite(&size, sizeof(size), 1, fp);
@@ -894,10 +1282,11 @@ static void save_project(AppState *app, const char *filename) {
 }
 
 static void export_canvas(AppState *app, const char *filename) {
-    if (!app->layers[0]) return;
+    if (!app->layer_list) return;
     
-    int w = cairo_image_surface_get_width(app->layers[0]);
-    int h = cairo_image_surface_get_height(app->layers[0]);
+    Layer *first = (Layer *)app->layer_list->data;
+    int w = cairo_image_surface_get_width(first->surface);
+    int h = cairo_image_surface_get_height(first->surface);
     
     cairo_surface_t *export_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     cairo_t *cr = cairo_create(export_surf);
@@ -907,9 +1296,12 @@ static void export_canvas(AppState *app, const char *filename) {
     cairo_paint(cr);
     
     // Layers
-    for (int i = 0; i < 2; i++) {
-        cairo_set_source_surface(cr, app->layers[i], 0, 0);
-        cairo_paint(cr);
+    for (GList *l = app->layer_list; l != NULL; l = l->next) {
+        Layer *layer = (Layer *)l->data;
+        if (layer->visible && layer->surface) {
+            cairo_set_source_surface(cr, layer->surface, 0, 0);
+            cairo_paint_with_alpha(cr, layer->alpha);
+        }
     }
     
     cairo_destroy(cr);
@@ -931,18 +1323,27 @@ static void load_project(AppState *app, const char *filename) {
     }
 
     // Restore App State
-    app->current_layer = header.current_layer;
     app->background_color = make_color(header.bg_r, header.bg_g, header.bg_b, header.bg_a);
     app->current_page_type = header.page_type;
     app->offset_x = header.offset_x;
     app->offset_y = header.offset_y;
     app->scale = header.scale;
     
-    // Re-create surfaces
-    ensure_surface(app, header.width, header.height, 0, 0); // Reset basics
-    
+    // Clear current layers
+    if (app->layer_list) {
+        for (GList *l = app->layer_list; l != NULL; l = l->next) {
+            Layer *layer = (Layer *)l->data;
+            cairo_surface_destroy(layer->surface);
+            g_free(layer->name);
+            free(layer);
+        }
+        g_list_free(app->layer_list);
+        app->layer_list = NULL;
+    }
+    gtk_combo_box_text_remove_all(app->layer_combo);
+
     // Read Layers
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < header.layer_count; i++) {
         uint64_t size;
         if (fread(&size, sizeof(size), 1, fp) != 1) break;
         
@@ -951,11 +1352,26 @@ static void load_project(AppState *app, const char *filename) {
         buf.data = malloc(size);
         if (fread(buf.data, 1, size, fp) != size) { free(buf.data); break; }
         
-        cairo_surface_destroy(app->layers[i]);
-        app->layers[i] = cairo_image_surface_create_from_png_stream(read_from_buffer, &buf);
+        Layer *l = malloc(sizeof(Layer));
+        l->name = g_strdup_printf("Layer %d", i + 1);
+        l->visible = TRUE;
+        l->alpha = 1.0;
+        l->surface = cairo_image_surface_create_from_png_stream(read_from_buffer, &buf);
         free(buf.data);
+        
+        app->layer_list = g_list_append(app->layer_list, l);
+        gtk_combo_box_text_append_text(app->layer_combo, l->name);
     }
-    app->surface = app->layers[app->current_layer];
+    
+    app->active_layer = (Layer *)g_list_nth_data(app->layer_list, header.active_layer_index);
+    if (!app->active_layer) app->active_layer = (Layer *)app->layer_list->data;
+    app->surface = app->active_layer->surface;
+    gtk_combo_box_set_active(GTK_COMBO_BOX(app->layer_combo), g_list_index(app->layer_list, app->active_layer));
+
+    // Re-create temp surface
+    if (app->temp_surface) cairo_surface_destroy(app->temp_surface);
+    app->temp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, header.width, header.height);
+    clear_temp_surface(app);
 
     fclose(fp);
     
@@ -1044,6 +1460,54 @@ static void on_save_clicked(GtkButton *btn, gpointer user_data) {
     gtk_widget_destroy(dialog);
 }
 
+static void export_pdf(AppState *app, const char *filename) {
+    if (!app->layer_list) return;
+
+    Layer *first = (Layer *)app->layer_list->data;
+    int w = cairo_image_surface_get_width(first->surface);
+    int h = cairo_image_surface_get_height(first->surface);
+
+    cairo_surface_t *pdf_surf = cairo_pdf_surface_create(filename, w, h);
+    cairo_t *cr = cairo_create(pdf_surf);
+
+    // Background
+    cairo_set_source_rgba(cr, app->background_color.r, app->background_color.g, app->background_color.b, app->background_color.a);
+    cairo_paint(cr);
+
+    // Layers
+    for (GList *l = app->layer_list; l != NULL; l = l->next) {
+        Layer *layer = (Layer *)l->data;
+        if (layer->visible && layer->surface) {
+            cairo_set_source_surface(cr, layer->surface, 0, 0);
+            cairo_paint_with_alpha(cr, layer->alpha);
+        }
+    }
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(pdf_surf);
+}
+
+static void on_export_pdf_clicked(GtkButton *btn, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+    (void)btn;
+
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export PDF",
+                                         GTK_WINDOW(app->window),
+                                         GTK_FILE_CHOOSER_ACTION_SAVE,
+                                         "_Cancel", GTK_RESPONSE_CANCEL,
+                                         "_Export", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
+    gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
+    gtk_file_chooser_set_current_name(chooser, "drawing.pdf");
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(chooser);
+        export_pdf(app, filename);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
 static void on_clear_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
@@ -1082,33 +1546,42 @@ static GtkWidget* create_color_button(AppState *app, double r, double g, double 
 static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    gtk_widget_set_size_request(scrolled, 220, -1);
+    // Remove fixed width request, rely on internal content size or a smaller request
+    gtk_widget_set_size_request(scrolled, 160, -1);
 
-    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    g_object_set(sidebar, "margin", 10, NULL);
+    GtkWidget *sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    g_object_set(sidebar, "margin", 8, NULL);
     gtk_container_add(GTK_CONTAINER(scrolled), sidebar);
 
-    // Tools (Cleaner Look)
-    GtkWidget *tools_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_style_context_add_class(gtk_widget_get_style_context(tools_box), "linked"); // Group them visually
+    // Tools - 4-column Grid for compactness
+    GtkWidget *tools_frame = gtk_frame_new("Tools");
+    GtkWidget *tools_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(tools_grid), 2);
+    gtk_grid_set_column_spacing(GTK_GRID(tools_grid), 2);
+    gtk_grid_set_column_homogeneous(GTK_GRID(tools_grid), TRUE);
+    g_object_set(tools_grid, "margin", 5, NULL);
     
-    const char *tool_icons[] = {"🖊️", "🧼", "📏", "⬜", "◯", "↗️", "𝐓"};
-    const char *tool_tips[] = {"Pen", "Eraser", "Line", "Rectangle", "Circle", "Arrow", "Text"};
+    const char *tool_icons[] = {"🖊️", "🧼", "🖍️", "🪣", "⛶", "📏", "⬜", "◯", "△", "⭐", "↗️", "𝐓"};
+    const char *tool_tips[] = {"Pen", "Eraser", "Highlighter", "Fill", "Select", "Line", "Rectangle", "Circle", "Triangle", "Star", "Arrow", "Text"};
     
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < TOOL_COUNT; i++) {
         GtkWidget *btn = gtk_toggle_button_new_with_label(tool_icons[i]);
         gtk_widget_set_tooltip_text(btn, tool_tips[i]);
         g_object_set_data(G_OBJECT(btn), "app_ptr", app);
         g_object_set_data(G_OBJECT(btn), "tool_id", GINT_TO_POINTER(i));
         g_signal_connect(btn, "toggled", G_CALLBACK(on_tool_toggled), NULL);
-        gtk_box_pack_start(GTK_BOX(tools_box), btn, TRUE, TRUE, 0);
+        
+        int row = i / 4;
+        int col = i % 4;
+        gtk_grid_attach(GTK_GRID(tools_grid), btn, col, row, 1, 1);
         app->tool_buttons[i] = btn;
     }
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->tool_buttons[0]), TRUE);
     
-    gtk_box_pack_start(GTK_BOX(sidebar), tools_box, FALSE, FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(tools_frame), tools_grid);
+    gtk_box_pack_start(GTK_BOX(sidebar), tools_frame, FALSE, FALSE, 0);
 
-    // Page Style & Layers (Combined for space)
+    // Page Style & Layers
     GtkWidget *style_frame = gtk_frame_new("Page & Layers");
     GtkWidget *style_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     g_object_set(style_box, "margin", 5, NULL);
@@ -1122,32 +1595,63 @@ static GtkWidget* create_sidebar(AppState *app) {
     g_signal_connect(page_combo, "changed", G_CALLBACK(on_page_combo_changed), app);
     gtk_box_pack_start(GTK_BOX(style_box), page_combo, FALSE, FALSE, 0);
 
+    GtkWidget *layer_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
     GtkWidget *layer_combo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(layer_combo), "Background Layer");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(layer_combo), "Foreground Layer");
-    gtk_combo_box_set_active(GTK_COMBO_BOX(layer_combo), 1);
+    app->layer_combo = GTK_COMBO_BOX_TEXT(layer_combo);
+    gtk_combo_box_text_append_text(app->layer_combo, "Layer 1");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(layer_combo), 0);
     g_signal_connect(layer_combo, "changed", G_CALLBACK(on_layer_combo_changed), app);
-    gtk_box_pack_start(GTK_BOX(style_box), layer_combo, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(layer_box), layer_combo, TRUE, TRUE, 0);
+
+    GtkWidget *add_layer_btn = gtk_button_new_with_label("+");
+    gtk_widget_set_tooltip_text(add_layer_btn, "Add Layer");
+    g_signal_connect(add_layer_btn, "clicked", G_CALLBACK(on_add_layer_clicked), app);
+    gtk_box_pack_start(GTK_BOX(layer_box), add_layer_btn, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(style_box), layer_box, FALSE, FALSE, 0);
+
+    GtkWidget *opt_grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(opt_grid), 2);
+    gtk_grid_set_column_spacing(GTK_GRID(opt_grid), 5);
+
+    GtkWidget *snap_toggle = gtk_check_button_new_with_label("Snap");
+    g_signal_connect(snap_toggle, "toggled", G_CALLBACK(on_snap_toggled), app);
+    gtk_grid_attach(GTK_GRID(opt_grid), snap_toggle, 0, 0, 1, 1);
+
+    GtkWidget *dark_toggle = gtk_check_button_new_with_label("Dark");
+    g_signal_connect(dark_toggle, "toggled", G_CALLBACK(on_dark_mode_toggled), app);
+    gtk_grid_attach(GTK_GRID(opt_grid), dark_toggle, 1, 0, 1, 1);
+    gtk_box_pack_start(GTK_BOX(style_box), opt_grid, FALSE, FALSE, 0);
 
     gtk_container_add(GTK_CONTAINER(style_frame), style_box);
     gtk_box_pack_start(GTK_BOX(sidebar), style_frame, FALSE, FALSE, 0);
 
-    // Brush Size
-    GtkWidget *brush_frame = gtk_frame_new("Sizes");
+    // Brush Size & Font
+    GtkWidget *brush_frame = gtk_frame_new("Brush & Font");
     GtkWidget *brush_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     g_object_set(brush_box, "margin", 5, NULL);
     
-    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Brush"), FALSE, FALSE, 0);
+    GtkWidget *sz_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(sz_grid), 5);
+    
+    gtk_grid_attach(GTK_GRID(sz_grid), gtk_label_new("Pen"), 0, 0, 1, 1);
     app->brush_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 50, 1);
+    gtk_widget_set_hexpand(app->brush_scale, TRUE);
     gtk_range_set_value(GTK_RANGE(app->brush_scale), app->brush_size);
     g_signal_connect(app->brush_scale, "value-changed", G_CALLBACK(on_brush_size_changed), app);
-    gtk_box_pack_start(GTK_BOX(brush_box), app->brush_scale, FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(sz_grid), app->brush_scale, 1, 0, 1, 1);
     
-    gtk_box_pack_start(GTK_BOX(brush_box), gtk_label_new("Eraser"), FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(sz_grid), gtk_label_new("Era"), 0, 1, 1, 1);
     app->eraser_scale = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 5, 100, 5);
+    gtk_widget_set_hexpand(app->eraser_scale, TRUE);
     gtk_range_set_value(GTK_RANGE(app->eraser_scale), app->eraser_size);
     g_signal_connect(app->eraser_scale, "value-changed", G_CALLBACK(on_eraser_size_changed), app);
-    gtk_box_pack_start(GTK_BOX(brush_box), app->eraser_scale, FALSE, FALSE, 0);
+    gtk_grid_attach(GTK_GRID(sz_grid), app->eraser_scale, 1, 1, 1, 1);
+
+    gtk_box_pack_start(GTK_BOX(brush_box), sz_grid, FALSE, FALSE, 0);
+
+    GtkWidget *font_btn = gtk_button_new_with_label("Select Font");
+    g_signal_connect(font_btn, "clicked", G_CALLBACK(on_font_clicked), app);
+    gtk_box_pack_start(GTK_BOX(brush_box), font_btn, FALSE, FALSE, 2);
 
     gtk_container_add(GTK_CONTAINER(brush_frame), brush_box);
     gtk_box_pack_start(GTK_BOX(sidebar), brush_frame, FALSE, FALSE, 0);
@@ -1157,29 +1661,25 @@ static GtkWidget* create_sidebar(AppState *app) {
     GtkWidget *colors_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     g_object_set(colors_box, "margin", 5, NULL);
     
-    // Custom Pickers Row
     GtkWidget *custom_grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(custom_grid), 5);
-    gtk_grid_set_column_spacing(GTK_GRID(custom_grid), 10);
+    gtk_grid_set_column_spacing(GTK_GRID(custom_grid), 5);
 
-    // Pen Color
-    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("Pen"), 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("Pen:"), 0, 0, 1, 1);
     GtkWidget *pen_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){0,0,0,1});
     g_signal_connect(pen_color_btn, "color-set", G_CALLBACK(on_custom_color_clicked), app);
     gtk_grid_attach(GTK_GRID(custom_grid), pen_color_btn, 1, 0, 1, 1);
 
-    // Quick Select for Pen (A small row of common colors)
     GtkWidget *quick_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 1);
     double quick_colors[][4] = {{0,0,0,1}, {1,0,0,1}, {0,0.7,0,1}, {0,0,1,1}, {1,1,0,1}};
     for (int i=0; i<5; i++) {
         GtkWidget *q_btn = create_color_button(app, quick_colors[i][0], quick_colors[i][1], quick_colors[i][2], quick_colors[i][3]);
-        gtk_widget_set_size_request(q_btn, 20, 20);
+        gtk_widget_set_size_request(q_btn, 18, 18);
         gtk_box_pack_start(GTK_BOX(quick_box), q_btn, FALSE, FALSE, 0);
     }
     gtk_grid_attach(GTK_GRID(custom_grid), quick_box, 2, 0, 1, 1);
 
-    // BG Color
-    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("BG"), 0, 1, 1, 1);
+    gtk_grid_attach(GTK_GRID(custom_grid), gtk_label_new("BG:"), 0, 1, 1, 1);
     GtkWidget *bg_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1,1,1,1});
     g_signal_connect(bg_color_btn, "color-set", G_CALLBACK(on_background_color_clicked), app);
     gtk_grid_attach(GTK_GRID(custom_grid), bg_color_btn, 1, 1, 1, 1);
@@ -1191,7 +1691,7 @@ static GtkWidget* create_sidebar(AppState *app) {
 
     // Actions
     GtkWidget *act_frame = gtk_frame_new("Actions");
-    GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *act_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
     g_object_set(act_box, "margin", 5, NULL);
     
     GtkWidget *undo_redo_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
@@ -1204,26 +1704,26 @@ static GtkWidget* create_sidebar(AppState *app) {
     gtk_box_pack_start(GTK_BOX(undo_redo_box), redo_btn, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(act_box), undo_redo_box, FALSE, FALSE, 0);
 
-    // File Actions (Open/Save Project)
     GtkWidget *file_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    GtkWidget *open_btn = gtk_button_new_with_label("📂 Open");
+    GtkWidget *open_btn = gtk_button_new_with_label("Open");
     g_signal_connect(open_btn, "clicked", G_CALLBACK(on_open_clicked), app);
     gtk_box_pack_start(GTK_BOX(file_box), open_btn, TRUE, TRUE, 0);
 
-    GtkWidget *save_proj_btn = gtk_button_new_with_label("💾 Save");
-    gtk_widget_set_tooltip_text(save_proj_btn, "Save Project (.sphy)");
+    GtkWidget *save_proj_btn = gtk_button_new_with_label("Save");
     g_signal_connect(save_proj_btn, "clicked", G_CALLBACK(on_save_project_clicked), app);
     gtk_box_pack_start(GTK_BOX(file_box), save_proj_btn, TRUE, TRUE, 0);
     gtk_box_pack_start(GTK_BOX(act_box), file_box, FALSE, FALSE, 0);
 
-    // Export & Clear
     GtkWidget *misc_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
-    GtkWidget *export_btn = gtk_button_new_with_label("🖼️ Export");
-    gtk_widget_set_tooltip_text(export_btn, "Export as PNG");
+    GtkWidget *export_btn = gtk_button_new_with_label("PNG");
     g_signal_connect(export_btn, "clicked", G_CALLBACK(on_save_clicked), app);
     gtk_box_pack_start(GTK_BOX(misc_box), export_btn, TRUE, TRUE, 0);
 
-    GtkWidget *clr_btn = gtk_button_new_with_label("🗑️ Clear");
+    GtkWidget *pdf_btn = gtk_button_new_with_label("PDF");
+    g_signal_connect(pdf_btn, "clicked", G_CALLBACK(on_export_pdf_clicked), app);
+    gtk_box_pack_start(GTK_BOX(misc_box), pdf_btn, TRUE, TRUE, 0);
+
+    GtkWidget *clr_btn = gtk_button_new_with_label("Clear");
     g_signal_connect(clr_btn, "clicked", G_CALLBACK(on_clear_clicked), app);
     gtk_box_pack_start(GTK_BOX(misc_box), clr_btn, TRUE, TRUE, 0);
     
@@ -1248,15 +1748,20 @@ int main(int argc, char *argv[]) {
     app->background_color = make_color(1, 1, 1, 1);
     app->brush_size = 3.0;
     app->eraser_size = 10.0;
+    app->font_name = g_strdup("Sans 12");
+    app->snap_to_grid = FALSE;
+    app->dark_mode = FALSE;
     app->offset_x = 0.0;
     app->offset_y = 0.0;
     app->scale = 1.0;
     app->panning = FALSE;
-    app->layers[0] = NULL;
-    app->layers[1] = NULL;
-    app->current_layer = 1;
+    app->layer_list = NULL;
+    app->active_layer = NULL;
     app->surface = NULL;
     app->temp_surface = NULL;
+    app->selection_surf = NULL;
+    app->has_selection = FALSE;
+    app->dragging_selection = FALSE;
     app->drawing = FALSE;
     app->point_count = 0;
     app->history_index = -1;
@@ -1276,6 +1781,7 @@ int main(int argc, char *argv[]) {
 
     // Drawing Area
     app->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(app->drawing_area, 600, 400); // Minimum size for canvas
     gtk_widget_set_events(app->drawing_area, 
                           GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | 
                           GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK);
@@ -1290,7 +1796,7 @@ int main(int argc, char *argv[]) {
     // Sidebar
     GtkWidget *sidebar = create_sidebar(app);
     gtk_box_pack_start(GTK_BOX(hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 2); // Reduced padding
     gtk_box_pack_start(GTK_BOX(hbox), app->drawing_area, TRUE, TRUE, 0);
 
     gtk_widget_show_all(app->window);
