@@ -14,22 +14,22 @@
 
 ---
 
-## ✨ Features
+## Features
 
-- **🚀 Performance-First:** Native C & Cairo implementation for near-zero latency drawing.
-- **🖋️ Stylus Optimized:** Full pressure sensitivity support for professional tablets.
-- **🌊 Fluid Lines:** Midpoint quadratic Bézier interpolation for smooth, natural strokes.
-- **🖼️ macOS Native:** Integrated with **SF Symbols** and tailored for Retina displays.
-- **🏗️ Layer System:** Organize your work with multiple layers and adjustable transparency.
-- **📏 Perfect Geometry:** Snap-to-grid shapes (Line, Circle, Star, Triangle, Arrow).
-- **📝 Multiple Backgrounds:** Grid, Lined, Dotted, or Plain canvas styles.
-- **📂 File Formats:** Save projects as `.sphy` or export to high-quality **PNG** and **PDF**.
+- **Performance-First:** Native C & Cairo implementation for near-zero latency drawing.
+- **Stylus Optimized:** Full pressure sensitivity support for professional tablets.
+- **Fluid Lines:** Midpoint quadratic Bézier interpolation for smooth, natural strokes.
+- **macOS Native:** Integrated with SF Symbols and tailored for Retina displays.
+- **Layer System:** Organize your work with multiple layers and adjustable transparency.
+- **Perfect Geometry:** Snap-to-grid shapes (Line, Circle, Star, Triangle, Arrow).
+- **Multiple Backgrounds:** Grid, Lined, Dotted, or Plain canvas styles.
+- **File Formats:** Save projects as .sphy or export to high-quality PNG and PDF.
 
 ---
 
-## 🛠️ Installation
+## Installation
 
-### 🍎 macOS
+### macOS
 **Prerequisites:** [Homebrew](https://brew.sh/)
 ```bash
 brew install gtk+3 cairo pkg-config
@@ -37,7 +37,7 @@ make macos
 open build/Splashy.app
 ```
 
-### 🐧 Linux
+### Linux
 **Prerequisites (Debian/Ubuntu):**
 ```bash
 sudo apt install build-essential libgtk-3-dev libcairo2-dev
@@ -47,7 +47,7 @@ make
 
 ---
 
-## ⌨️ Keybindings
+## Keybindings
 
 | Shortcut | Action |
 | :--- | :--- |
@@ -61,7 +61,7 @@ make
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions make the open-source community an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
@@ -73,10 +73,8 @@ Contributions make the open-source community an amazing place to learn, inspire,
 
 ---
 
-## 📜 License
+## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
-<div align="center">
-  Built with ❤️ by [maskedsyntax](https://github.com/maskedsyntax)
-</div>
+Built by [maskedsyntax](https://github.com/maskedsyntax)
