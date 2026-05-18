@@ -5,6 +5,53 @@
 #include <stdlib.h>
 #include <pango/pangocairo.h>
 
+#ifdef __APPLE__
+#import <AppKit/AppKit.h>
+#define APP_MODIFIER_MASK GDK_META_MASK
+
+static GdkPixbuf *get_sf_symbol_pixbuf(const char *name, int size) {
+    if (@available(macOS 11.0, *)) {
+        NSString *nsName = [NSString stringWithUTF8String:name];
+        NSImage *image = [NSImage imageWithSystemSymbolName:nsName accessibilityDescription:nil];
+        if (!image) return NULL;
+
+        NSImageSymbolConfiguration *conf = [NSImageSymbolConfiguration configurationWithPointSize:size weight:NSFontWeightRegular];
+        image = [image imageWithSymbolConfiguration:conf];
+
+        // Ensure we get a good rendering
+        NSRect rect = NSMakeRect(0, 0, size, size);
+        CGImageRef cgImage = [image CGImageForProposedRect:&rect context:NULL hints:NULL];
+        if (!cgImage) return NULL;
+
+        int width = (int)CGImageGetWidth(cgImage);
+        int height = (int)CGImageGetHeight(cgImage);
+
+        GdkPixbuf *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, width, height);
+        guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+        int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        CGContextRef context = CGBitmapContextCreate(pixels, width, height, 8, rowstride, colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        
+        // Clear context before drawing
+        CGContextClearRect(context, CGRectMake(0, 0, width, height));
+        
+        // Handle dark mode for symbol rendering if needed, 
+        // but typically the symbol color follows the context.
+        // For simplicity, we just draw it.
+        CGContextDrawImage(context, CGRectMake(0, 0, width, height), cgImage);
+
+        CGContextRelease(context);
+        CGColorSpaceRelease(colorSpace);
+
+        return pixbuf;
+    }
+    return NULL;
+}
+#else
+#define APP_MODIFIER_MASK GDK_CONTROL_MASK
+#endif
+
 // --- Constants & Enums ---
 
 typedef enum {
@@ -34,7 +81,7 @@ typedef struct {
 typedef struct {
     double x, y;
     double pressure;
-} Point;
+} SplashyPoint;
 
 typedef enum {
     PAGE_PLAIN,
@@ -97,10 +144,10 @@ typedef struct {
     double last_pan_x, last_pan_y;
 
     // Input State
-    Point start_point; // For shapes
+    SplashyPoint start_point; // For shapes
     
     // Smoothing / Interpolation Buffer
-    Point points[4];
+    SplashyPoint points[4];
     int point_count;
     
 } AppState;
@@ -137,8 +184,11 @@ typedef struct {
 static cairo_status_t write_to_buffer(void *closure, const unsigned char *data, unsigned int length) {
     MemBuffer *buf = (MemBuffer *)closure;
     if (buf->size + length > buf->capacity) {
-        buf->capacity = (buf->size + length) * 2 + 1024;
-        buf->data = realloc(buf->data, buf->capacity);
+        size_t new_capacity = (buf->size + length) * 2 + 1024;
+        unsigned char *new_data = realloc(buf->data, new_capacity);
+        if (!new_data) return CAIRO_STATUS_WRITE_ERROR;
+        buf->data = new_data;
+        buf->capacity = new_capacity;
     }
     memcpy(buf->data + buf->size, data, length);
     buf->size += length;
@@ -392,9 +442,9 @@ static void draw_smooth_segment(AppState *app, cairo_t *cr) {
     // actually, midpoint smoothing uses 3 points to draw from mid1 to mid2.
     if (app->point_count < 3) return;
 
-    Point p0 = app->points[0];
-    Point p1 = app->points[1];
-    Point p2 = app->points[2];
+    SplashyPoint p0 = app->points[0];
+    SplashyPoint p1 = app->points[1];
+    SplashyPoint p2 = app->points[2];
 
     // Midpoints
     double mid1_x = (p0.x + p1.x) / 2.0;
@@ -525,7 +575,7 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
     AppState *app = (AppState *)user_data;
     (void)widget;
 
-    if ((event->state & GDK_CONTROL_MASK)) {
+    if ((event->state & APP_MODIFIER_MASK)) {
         switch (event->keyval) {
             case GDK_KEY_z:
                 if (event->state & GDK_SHIFT_MASK) redo(app);
@@ -552,7 +602,7 @@ static gboolean on_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer use
     AppState *app = (AppState *)user_data;
     
     // Check for Control key to Zoom, otherwise Pan
-    if (event->state & GDK_CONTROL_MASK) {
+    if (event->state & APP_MODIFIER_MASK) {
         double zoom_factor = 1.1;
         if (event->direction == GDK_SCROLL_DOWN) zoom_factor = 1.0 / 1.1;
         else if (event->direction == GDK_SCROLL_UP) zoom_factor = 1.1;
@@ -620,7 +670,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
              }
         }
         
-        Point p = {wx, wy, pressure};
+        SplashyPoint p = {wx, wy, pressure};
 
         // Save history before we start drawing
         save_history(app);
@@ -850,7 +900,7 @@ static gboolean on_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpoin
             pressure = p_val;
         }
 
-        Point curr = {wx, wy, pressure};
+        SplashyPoint curr = {wx, wy, pressure};
 
         if (app->current_tool == TOOL_PEN || app->current_tool == TOOL_ERASER || app->current_tool == TOOL_HIGHLIGHTER) {
             // Add to buffer
@@ -1008,8 +1058,8 @@ static gboolean on_button_release(GtkWidget *widget, GdkEventButton *event, gpoi
              
              // Draw remaining
              if (app->point_count >= 2) {
-                 Point p_last = app->points[app->point_count-1];
-                 Point p_prev = app->points[app->point_count-2];
+                 SplashyPoint p_last = app->points[app->point_count-1];
+                 SplashyPoint p_prev = app->points[app->point_count-2];
                  double mid_x = (p_prev.x + p_last.x) / 2.0;
                  double mid_y = (p_prev.y + p_last.y) / 2.0;
                  
@@ -1564,10 +1614,25 @@ static GtkWidget* create_sidebar(AppState *app) {
     g_object_set(tools_grid, "margin", 5, NULL);
     
     const char *tool_icons[] = {"🖊️", "🧼", "🖍️", "🪣", "⛶", "📏", "⬜", "◯", "△", "⭐", "↗️", "𝐓"};
+    const char *sf_symbols[] = {"pencil", "eraser", "highlighter", "paintbucket", "square.dashed", "line.diagonal", "square", "circle", "triangle", "star", "arrow.up.forward", "textformat"};
     const char *tool_tips[] = {"Pen", "Eraser", "Highlighter", "Fill", "Select", "Line", "Rectangle", "Circle", "Triangle", "Star", "Arrow", "Text"};
     
     for (int i = 0; i < TOOL_COUNT; i++) {
-        GtkWidget *btn = gtk_toggle_button_new_with_label(tool_icons[i]);
+        GtkWidget *btn = gtk_toggle_button_new();
+        
+        #ifdef __APPLE__
+        GdkPixbuf *pb = get_sf_symbol_pixbuf(sf_symbols[i], 16);
+        if (pb) {
+            GtkWidget *img = gtk_image_new_from_pixbuf(pb);
+            gtk_button_set_image(GTK_BUTTON(btn), img);
+            g_object_unref(pb);
+        } else {
+            gtk_button_set_label(GTK_BUTTON(btn), tool_icons[i]);
+        }
+        #else
+        gtk_button_set_label(GTK_BUTTON(btn), tool_icons[i]);
+        #endif
+
         gtk_widget_set_tooltip_text(btn, tool_tips[i]);
         g_object_set_data(G_OBJECT(btn), "app_ptr", app);
         g_object_set_data(G_OBJECT(btn), "tool_id", GINT_TO_POINTER(i));
@@ -1739,9 +1804,50 @@ static GtkWidget* create_sidebar(AppState *app) {
 
 // --- Main ---
 
+static void activate(GtkApplication *app_ptr, gpointer user_data) {
+    AppState *app = (AppState *)user_data;
+
+    // Window
+    app->window = gtk_application_window_new(app_ptr);
+    gtk_window_set_title(GTK_WINDOW(app->window), "Splashy");
+    gtk_window_set_default_size(GTK_WINDOW(app->window), 1000, 700);
+
+    // Set minimum window size to prevent cutting off the sidebar
+    GdkGeometry geometry;
+    geometry.min_width = 850;
+    geometry.min_height = 650;
+    gtk_window_set_geometry_hints(GTK_WINDOW(app->window), NULL, &geometry, GDK_HINT_MIN_SIZE);
+
+    g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
+
+    // Layout
+    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_container_add(GTK_CONTAINER(app->window), hbox);
+
+    // Drawing Area
+    app->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(app->drawing_area, 600, 400); // Minimum size for canvas
+    gtk_widget_set_events(app->drawing_area, 
+                          GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | 
+                          GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK);
+
+    g_signal_connect(app->drawing_area, "draw", G_CALLBACK(on_draw), app);
+    g_signal_connect(app->drawing_area, "configure-event", G_CALLBACK(on_configure), app);
+    g_signal_connect(app->drawing_area, "button-press-event", G_CALLBACK(on_button_press), app);
+    g_signal_connect(app->drawing_area, "button-release-event", G_CALLBACK(on_button_release), app);
+    g_signal_connect(app->drawing_area, "motion-notify-event", G_CALLBACK(on_motion_notify), app);
+    g_signal_connect(app->drawing_area, "scroll-event", G_CALLBACK(on_scroll), app);
+
+    // Sidebar
+    GtkWidget *sidebar = create_sidebar(app);
+    gtk_box_pack_start(GTK_BOX(hbox), sidebar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 2);
+    gtk_box_pack_start(GTK_BOX(hbox), app->drawing_area, TRUE, TRUE, 0);
+
+    gtk_widget_show_all(app->window);
+}
+
 int main(int argc, char *argv[]) {
-    gtk_init(&argc, &argv);
-    
     AppState *app = malloc(sizeof(AppState));
     // Defaults
     app->current_tool = TOOL_PEN;
@@ -1770,52 +1876,16 @@ int main(int argc, char *argv[]) {
     app->history_max = -1;
     for (int i = 0; i < MAX_UNDO; i++) app->undo_stack[i] = NULL;
 
-    // Window
-    app->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(app->window), "Splashy - Advanced Whiteboard (C)");
-    gtk_window_set_default_size(GTK_WINDOW(app->window), 1000, 700);
-    
-    // Set minimum window size to prevent cutting off the sidebar
-    GdkGeometry geometry;
-    geometry.min_width = 850;
-    geometry.min_height = 650;
-    gtk_window_set_geometry_hints(GTK_WINDOW(app->window), NULL, &geometry, GDK_HINT_MIN_SIZE);
+    GtkApplication *gtk_app = gtk_application_new("com.maskedsyntax.splashy", G_APPLICATION_DEFAULT_FLAGS);
+    g_signal_connect(gtk_app, "activate", G_CALLBACK(activate), app);
 
-    g_signal_connect(app->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
-    g_signal_connect(app->window, "key-press-event", G_CALLBACK(on_key_press), app);
+    int status = g_application_run(G_APPLICATION(gtk_app), argc, argv);
+    g_object_unref(gtk_app);
 
-    // Layout
-    GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_add(GTK_CONTAINER(app->window), hbox);
-
-    // Drawing Area
-    app->drawing_area = gtk_drawing_area_new();
-    gtk_widget_set_size_request(app->drawing_area, 600, 400); // Minimum size for canvas
-    gtk_widget_set_events(app->drawing_area, 
-                          GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | 
-                          GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK);
-    
-    g_signal_connect(app->drawing_area, "draw", G_CALLBACK(on_draw), app);
-    g_signal_connect(app->drawing_area, "configure-event", G_CALLBACK(on_configure), app);
-    g_signal_connect(app->drawing_area, "button-press-event", G_CALLBACK(on_button_press), app);
-    g_signal_connect(app->drawing_area, "button-release-event", G_CALLBACK(on_button_release), app);
-    g_signal_connect(app->drawing_area, "motion-notify-event", G_CALLBACK(on_motion_notify), app);
-    g_signal_connect(app->drawing_area, "scroll-event", G_CALLBACK(on_scroll), app);
-
-    // Sidebar
-    GtkWidget *sidebar = create_sidebar(app);
-    gtk_box_pack_start(GTK_BOX(hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 2); // Reduced padding
-    gtk_box_pack_start(GTK_BOX(hbox), app->drawing_area, TRUE, TRUE, 0);
-
-    gtk_widget_show_all(app->window);
-    
-    gtk_main();
-    
-    // Cleanup if we exit loop
+    // Cleanup
     if (app->surface) cairo_surface_destroy(app->surface);
     if (app->temp_surface) cairo_surface_destroy(app->temp_surface);
     free(app);
 
-    return 0;
+    return status;
 }

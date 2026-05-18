@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="256" height="256" alt="splashy-wobg" src="https://github.com/user-attachments/assets/740e9b85-354e-43db-9175-cc4e5a73f9c6" />  
+  <img width="256" height="256" alt="Splashy Logo" src="logo.png" />  
   
   <h1>Splashy</h1> 
   
@@ -38,9 +38,25 @@ sudo apt install build-essential libgtk-3-dev libcairo2-dev
 ```
 
 ### Build and Run
+
+#### Linux
 ```bash
 make
 ./build/splashy
+```
+
+#### macOS
+Ensure you have dependencies installed via Homebrew:
+```bash
+brew install gtk+3 cairo pkg-config
+```
+Build the app bundle:
+```bash
+make macos
+```
+Run the app:
+```bash
+open build/Splashy.app
 ```
 
 ---
