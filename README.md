@@ -1,72 +1,82 @@
 <div align="center">
-  <img width="128" height="128" alt="Splashy Logo" src="logo.svg" />  
+  <img src="logo.svg" width="120" height="120" alt="Splashy Logo" />
+
+  # Splashy
   
-  <h1>Splashy</h1> 
-  
-  **Splashy** is a lightweight and feature-rich whiteboard application for Linux, built with **GTK3** and **Cairo** for maximum performance and responsiveness.
-  It is designed for quick sketches, diagrams, and professional handwritten notes.
+  **The lightweight, high-performance digital whiteboard for Linux & macOS.**
+
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-blue.svg)](#)
+  [![C](https://img.shields.io/badge/Language-C-00599C.svg)](#)
+
+  [Features](#-features) • [Installation](#-installation) • [Keybindings](#-keybindings) • [License](#-license)
 </div>
 
 ---
 
-## Features
+## ✨ Features
 
-- **High Performance:** Native C implementation for ultra-low latency.
-- **Stylus Support:** Pressure sensitivity support for professional styluses.
-- **Smooth Drawing:** Midpoint quadratic Bézier interpolation for fluid lines.
-- **Infinite Canvas:** Horizontal and vertical scaling/panning for unlimited workspace.
-- **Page Backgrounds:** Switch between Grid, Lined, Dotted, and Plain backgrounds.
-- **Layer Management:** Background and Foreground layers for complex illustrations.
-- **Undo/Redo:** Comprehensive history stack for all drawing actions.
-- **Export:** Save your canvas as high-quality PNG images.
-- **Comprehensive Toolset:** Pen, Eraser, Line, Rectangle, Circle, Arrow, and Text.
+- **🚀 Performance-First:** Native C & Cairo implementation for near-zero latency drawing.
+- **🖋️ Stylus Optimized:** Full pressure sensitivity support for professional tablets.
+- **🌊 Fluid Lines:** Midpoint quadratic Bézier interpolation for smooth, natural strokes.
+- **🖼️ macOS Native:** Integrated with **SF Symbols** and tailored for Retina displays.
+- **🏗️ Layer System:** Organize your work with multiple layers and adjustable transparency.
+- **📏 Perfect Geometry:** Snap-to-grid shapes (Line, Circle, Star, Triangle, Arrow).
+- **📝 Multiple Backgrounds:** Grid, Lined, Dotted, or Plain canvas styles.
+- **📂 File Formats:** Save projects as `.sphy` or export to high-quality **PNG** and **PDF**.
 
 ---
 
-## Getting Started
+## 🛠️ Installation
 
-### Requirements
-Ensure you have the following installed:
-- `GCC` (Compiler)
-- `Make`
-- `GTK+ 3.0` development headers
-- `Cairo` development headers
-
-On Debian/Ubuntu-based systems, install dependencies with:
+### 🍎 macOS
+**Prerequisites:** [Homebrew](https://brew.sh/)
 ```bash
-sudo apt install build-essential libgtk-3-dev libcairo2-dev
+brew install gtk+3 cairo pkg-config
+make macos
+open build/Splashy.app
 ```
 
-### Build and Run
-
-#### Linux
+### 🐧 Linux
+**Prerequisites (Debian/Ubuntu):**
 ```bash
+sudo apt install build-essential libgtk-3-dev libcairo2-dev
 make
 ./build/splashy
 ```
 
-#### macOS
-Ensure you have dependencies installed via Homebrew:
-```bash
-brew install gtk+3 cairo pkg-config
-```
-Build the app bundle:
-```bash
-make macos
-```
-Run the app:
-```bash
-open build/Splashy.app
-```
+---
+
+## ⌨️ Keybindings
+
+| Shortcut | Action |
+| :--- | :--- |
+| `Cmd/Ctrl + Z` | Undo |
+| `Cmd/Ctrl + Shift + Z` | Redo |
+| `Cmd/Ctrl + S` | Save Project (`.sphy`) |
+| `Cmd/Ctrl + E` | Export as PNG |
+| `Cmd/Ctrl + O` | Open Project |
+| `Scroll` | Pan Canvas |
+| `Cmd/Ctrl + Scroll` | Zoom In/Out |
 
 ---
 
-## Contributions
+## 🤝 Contributing
 
-Contributions are welcome! Fork the repo, create a branch, and open a pull request.
+Contributions make the open-source community an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+
+1. Fork the Project
+2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the Branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
 ---
 
-## License
+## 📜 License
 
-This project is licensed under the [**MIT License**](./LICENSE).
+Distributed under the MIT License. See `LICENSE` for more information.
+
+<div align="center">
+  Built with ❤️ by [maskedsyntax](https://github.com/maskedsyntax)
+</div>
