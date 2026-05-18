@@ -1,5 +1,5 @@
 <div align="center">
-  <img width="256" height="256" alt="Splashy Logo" src="logo.png" />  
+  <img width="128" height="128" alt="Splashy Logo" src="logo.svg" />  
   
   <h1>Splashy</h1> 
   
