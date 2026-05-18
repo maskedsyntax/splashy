@@ -1,0 +1,90 @@
+:root {
+  --bg-color: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --text-color: #1d1d1f;
+  --text-secondary: #86868b;
+  --accent-color: #0066cc;
+  --accent-hover: #0077ed;
+  --border-color: #d2d2d7;
+  --card-bg: #ffffff;
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --border-radius: 18px;
+  --transition-speed: 0.3s;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-color: #161617;
+    --bg-secondary: #1d1d1f;
+    --text-color: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --accent-color: #2997ff;
+    --accent-hover: #147ce5;
+    --border-color: #424245;
+    --card-bg: #1d1d1f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--accent-color);
+  text-decoration: none;
+  transition: color var(--transition-speed);
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--accent-color);
+  color: #ffffff !important;
+  padding: 12px 28px;
+  border-radius: 30px;
+  font-weight: 600;
+  font-size: 17px;
+  text-decoration: none;
+  transition: all var(--transition-speed) ease;
+  border: none;
+  cursor: pointer;
+}
+
+.button:hover {
+  background-color: var(--accent-hover);
+  text-decoration: none;
+  transform: scale(1.03);
+}
+
+.button.secondary {
+  background-color: transparent;
+  color: var(--text-color) !important;
+  border: 1px solid var(--border-color);
+}
+
+.button.secondary:hover {
+  background-color: var(--border-color);
+}
+
+h1, h2, h3 {
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
