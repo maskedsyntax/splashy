@@ -1294,7 +1294,11 @@ static void save_project(AppState *app, const char *filename) {
     if (!fp) return;
 
     Layer *first = (Layer *)app->layer_list->data;
-    
+    if (!first || !first->surface) {
+        fclose(fp);
+        return;
+    }
+
     // Prepare Header
     ProjectHeader header;
     memset(&header, 0, sizeof(header));
@@ -1318,19 +1322,20 @@ static void save_project(AppState *app, const char *filename) {
     // Write Layers
     for (GList *l = app->layer_list; l != NULL; l = l->next) {
         Layer *layer = (Layer *)l->data;
+        if (!layer || !layer->surface) continue;
         MemBuffer buf = {0};
         cairo_surface_write_to_png_stream(layer->surface, write_to_buffer, &buf);
-        
+
         uint64_t size = buf.size; // Write size first
         fwrite(&size, sizeof(size), 1, fp);
-        fwrite(buf.data, 1, buf.size, fp);
-        
-        free(buf.data);
+        if (buf.data) {
+            fwrite(buf.data, 1, buf.size, fp);
+            free(buf.data);
+        }
     }
 
     fclose(fp);
 }
-
 static void export_canvas(AppState *app, const char *filename) {
     if (!app->layer_list) return;
     
@@ -1390,6 +1395,8 @@ static void load_project(AppState *app, const char *filename) {
         g_list_free(app->layer_list);
         app->layer_list = NULL;
     }
+    app->active_layer = NULL;
+    app->surface = NULL;
     gtk_combo_box_text_remove_all(app->layer_combo);
 
     // Read Layers
@@ -1561,6 +1568,7 @@ static void on_export_pdf_clicked(GtkButton *btn, gpointer user_data) {
 static void on_clear_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
+    if (!app->surface) return;
     save_history(app);
     clear_surface(app->surface, app->background_color);
     gtk_widget_queue_draw(app->drawing_area);
@@ -1810,7 +1818,25 @@ static void activate(GtkApplication *app_ptr, gpointer user_data) {
     // Window
     app->window = gtk_application_window_new(app_ptr);
     gtk_window_set_title(GTK_WINDOW(app->window), "Splashy");
-    gtk_window_set_default_size(GTK_WINDOW(app->window), 1000, 700);
+    
+    int win_w = 1000;
+    int win_h = 700;
+    gtk_window_set_default_size(GTK_WINDOW(app->window), win_w, win_h);
+
+    // Detect monitor with mouse pointer and center window there
+    GdkDisplay *display = gdk_display_get_default();
+    GdkSeat *seat = gdk_display_get_default_seat(display);
+    GdkDevice *device = gdk_seat_get_pointer(seat);
+    int mouse_x, mouse_y;
+    gdk_device_get_position(device, NULL, &mouse_x, &mouse_y);
+    
+    GdkMonitor *monitor = gdk_display_get_monitor_at_point(display, mouse_x, mouse_y);
+    GdkRectangle monitor_geo;
+    gdk_monitor_get_geometry(monitor, &monitor_geo);
+    
+    gtk_window_move(GTK_WINDOW(app->window), 
+                    monitor_geo.x + (monitor_geo.width - win_w) / 2, 
+                    monitor_geo.y + (monitor_geo.height - win_h) / 2);
 
     // Set minimum window size to prevent cutting off the sidebar
     GdkGeometry geometry;
