@@ -2,18 +2,56 @@
   import { onMount } from 'svelte';
 
   let os = $state('linux');
+  let theme = $state('auto');
 
   onMount(() => {
     if (navigator.userAgent.indexOf("Mac") !== -1) {
       os = 'mac';
     }
+    
+    const savedTheme = localStorage.getItem('theme') || 'auto';
+    applyTheme(savedTheme);
   });
+
+  function applyTheme(newTheme) {
+    theme = newTheme;
+    localStorage.setItem('theme', newTheme);
+    if (newTheme === 'auto') {
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', newTheme);
+    }
+  }
+
+  function toggleTheme() {
+    if (theme === 'light') applyTheme('dark');
+    else if (theme === 'dark') applyTheme('auto');
+    else applyTheme('light');
+  }
 </script>
 
 <svelte:head>
   <title>Splashy | Advanced Whiteboard</title>
   <meta name="description" content="A lightweight and feature-rich whiteboard application for Linux and macOS, built with GTK3 and Cairo for maximum performance and responsiveness." />
 </svelte:head>
+
+<header class="top-nav">
+  <div class="container nav-content">
+    <div class="nav-logo">
+      <img src="/logo.svg" alt="" class="nav-icon" />
+      <span>Splashy</span>
+    </div>
+    <button class="theme-toggle" onclick={toggleTheme} aria-label="Toggle Theme">
+      {#if theme === 'light'}
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      {:else if theme === 'dark'}
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      {:else}
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="2" x2="12" y2="22"/><path d="M12 2a10 10 0 0 1 0 20"/></svg>
+      {/if}
+    </button>
+  </div>
+</header>
 
 <main>
   <section class="hero">
@@ -103,9 +141,74 @@
 </footer>
 
 <style>
+  /* Navigation */
+  .top-nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 52px;
+    background: rgba(var(--bg-color-rgb, 255, 255, 255), 0.8);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--border-color);
+    z-index: 1000;
+  }
+
+  :root {
+    --bg-color-rgb: 255, 255, 255;
+  }
+
+  [data-theme='dark'] {
+    --bg-color-rgb: 22, 22, 23;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --bg-color-rgb: 22, 22, 23;
+    }
+  }
+
+  .nav-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+
+  .nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 17px;
+  }
+
+  .nav-icon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .theme-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-color);
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease;
+  }
+
+  .theme-toggle:hover {
+    background: var(--bg-secondary);
+  }
+
   /* Local styles specific to the landing page */
   .hero {
-    padding: 120px 0 80px;
+    padding: 160px 0 80px;
     text-align: center;
   }
 

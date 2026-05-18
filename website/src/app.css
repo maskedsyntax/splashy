@@ -12,8 +12,19 @@
   --transition-speed: 0.3s;
 }
 
+[data-theme='dark'] {
+  --bg-color: #161617;
+  --bg-secondary: #1d1d1f;
+  --text-color: #f5f5f7;
+  --text-secondary: #a1a1a6;
+  --accent-color: #2997ff;
+  --accent-hover: #147ce5;
+  --border-color: #424245;
+  --card-bg: #1d1d1f;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg-color: #161617;
     --bg-secondary: #1d1d1f;
     --text-color: #f5f5f7;
