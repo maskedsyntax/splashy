@@ -3,7 +3,9 @@ CFLAGS = -Wall -Wextra -O2 `pkg-config --cflags gtk+-3.0` -lm
 LDFLAGS = `pkg-config --libs gtk+-3.0` -lm
 
 ifeq ($(shell uname), Darwin)
-    CFLAGS += -x objective-c
+    MACOSX_DEPLOYMENT_TARGET ?= 26.0
+    export MACOSX_DEPLOYMENT_TARGET
+    CFLAGS += -x objective-c -mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)
     LDFLAGS += -framework AppKit
 endif
 
@@ -15,6 +17,10 @@ APP_BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
 CONTENTS = $(APP_BUNDLE)/Contents
 MACOS = $(CONTENTS)/MacOS
 RESOURCES = $(CONTENTS)/Resources
+ENTITLEMENTS = packaging/macos/Splashy.entitlements
+DEVELOPER_ID ?=
+APP_STORE_IDENTITY ?=
+INSTALLER_IDENTITY ?=
 
 all: directories $(BUILD_DIR)/$(TARGET)
 
@@ -43,10 +49,31 @@ macos: all AppIcon.icns
 	cp AppIcon.icns $(RESOURCES)/
 	@echo "Built $(APP_BUNDLE)"
 
+macos-bundle: macos
+	chmod +x packaging/macos/bundle-gtk.sh
+	packaging/macos/bundle-gtk.sh $(APP_BUNDLE)
+
+macos-sign: macos-bundle
+	@if [ -z "$(DEVELOPER_ID)" ]; then echo "Set DEVELOPER_ID to your signing identity."; exit 1; fi
+	find $(APP_BUNDLE)/Contents/Frameworks $(APP_BUNDLE)/Contents/Resources/lib -type f \( -name '*.dylib' -o -name '*.so' \) -exec codesign --force --options runtime --timestamp --sign "$(DEVELOPER_ID)" {} \;
+	codesign --force --options runtime --timestamp --entitlements $(ENTITLEMENTS) --sign "$(DEVELOPER_ID)" $(APP_BUNDLE)
+	codesign --verify --strict --verbose=2 $(APP_BUNDLE)
+
+macos-appstore-sign: macos-bundle
+	@if [ -z "$(APP_STORE_IDENTITY)" ]; then echo "Set APP_STORE_IDENTITY to your Mac App Store application signing identity."; exit 1; fi
+	find $(APP_BUNDLE)/Contents/Frameworks $(APP_BUNDLE)/Contents/Resources/lib -type f \( -name '*.dylib' -o -name '*.so' \) -exec codesign --force --options runtime --timestamp --sign "$(APP_STORE_IDENTITY)" {} \;
+	codesign --force --options runtime --timestamp --entitlements $(ENTITLEMENTS) --sign "$(APP_STORE_IDENTITY)" $(APP_BUNDLE)
+	codesign --verify --strict --verbose=2 $(APP_BUNDLE)
+
+macos-pkg: macos-appstore-sign
+	@if [ -z "$(INSTALLER_IDENTITY)" ]; then echo "Set INSTALLER_IDENTITY to your Mac App Store installer signing identity."; exit 1; fi
+	productbuild --component $(APP_BUNDLE) /Applications --sign "$(INSTALLER_IDENTITY)" $(BUILD_DIR)/$(APP_NAME).pkg
+	@echo "Built $(BUILD_DIR)/$(APP_NAME).pkg"
+
 directories:
 	mkdir -p $(BUILD_DIR)
 
 clean:
 	rm -rf $(BUILD_DIR) AppIcon.icns
 
-.PHONY: all clean directories macos
+.PHONY: all clean directories macos macos-bundle macos-sign macos-appstore-sign macos-pkg

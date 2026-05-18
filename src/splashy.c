@@ -7,7 +7,47 @@
 
 #ifdef __APPLE__
 #import <AppKit/AppKit.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
 #define APP_MODIFIER_MASK GDK_META_MASK
+
+static void set_env_if_exists(const char *name, const char *path) {
+    if (g_file_test(path, G_FILE_TEST_EXISTS)) {
+        g_setenv(name, path, TRUE);
+    }
+}
+
+static void configure_macos_bundle_environment(void) {
+    char executable_path[PATH_MAX];
+    uint32_t executable_path_size = sizeof(executable_path);
+
+    if (_NSGetExecutablePath(executable_path, &executable_path_size) != 0) {
+        return;
+    }
+
+    char resolved_path[PATH_MAX];
+    const char *path = realpath(executable_path, resolved_path) ? resolved_path : executable_path;
+    char *macos_dir = g_path_get_dirname(path);
+    char *contents_dir = g_path_get_dirname(macos_dir);
+    char *resources_dir = g_build_filename(contents_dir, "Resources", NULL);
+    char *share_dir = g_build_filename(resources_dir, "share", NULL);
+    char *schemas_dir = g_build_filename(share_dir, "glib-2.0", "schemas", NULL);
+    char *pixbuf_cache = g_build_filename(resources_dir, "lib", "gdk-pixbuf-2.0", "2.10.0", "loaders.cache", NULL);
+    char *immodules_cache = g_build_filename(resources_dir, "lib", "gtk-3.0", "3.0.0", "immodules.cache", NULL);
+
+    set_env_if_exists("XDG_DATA_DIRS", share_dir);
+    set_env_if_exists("GSETTINGS_SCHEMA_DIR", schemas_dir);
+    set_env_if_exists("GDK_PIXBUF_MODULE_FILE", pixbuf_cache);
+    set_env_if_exists("GTK_IM_MODULE_FILE", immodules_cache);
+
+    g_free(immodules_cache);
+    g_free(pixbuf_cache);
+    g_free(schemas_dir);
+    g_free(share_dir);
+    g_free(resources_dir);
+    g_free(contents_dir);
+    g_free(macos_dir);
+}
 
 static GdkPixbuf *get_sf_symbol_pixbuf(const char *name, int size) {
     if (@available(macOS 11.0, *)) {
@@ -1187,6 +1227,7 @@ static void on_eraser_size_changed(GtkRange *range, gpointer user_data) {
 
 static void on_font_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
+    (void)btn;
     GtkWidget *dialog = gtk_font_chooser_dialog_new("Select Font", GTK_WINDOW(app->window));
     gtk_font_chooser_set_font(GTK_FONT_CHOOSER(dialog), app->font_name);
     
@@ -1444,67 +1485,66 @@ static void on_save_project_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
     
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Save Project", GTK_WINDOW(app->window),
-                                                    GTK_FILE_CHOOSER_ACTION_SAVE,
-                                                    "_Cancel", GTK_RESPONSE_CANCEL,
-                                                    "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new("Save Project",
+                                                               GTK_WINDOW(app->window),
+                                                               GTK_FILE_CHOOSER_ACTION_SAVE,
+                                                               "_Save",
+                                                               "_Cancel");
     GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
     gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
     gtk_file_chooser_set_current_name(chooser, "project.sphy");
 
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+    if (gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(chooser);
         save_project(app, filename);
         g_free(filename);
     }
-    gtk_widget_destroy(dialog);
+    g_object_unref(dialog);
 }
 
 static void on_open_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
     
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Open Project", GTK_WINDOW(app->window),
-                                                    GTK_FILE_CHOOSER_ACTION_OPEN,
-                                                    "_Cancel", GTK_RESPONSE_CANCEL,
-                                                    "_Open", GTK_RESPONSE_ACCEPT, NULL);
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new("Open Project",
+                                                               GTK_WINDOW(app->window),
+                                                               GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                               "_Open",
+                                                               "_Cancel");
     GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
     GtkFileFilter *filter = gtk_file_filter_new();
     gtk_file_filter_set_name(filter, "Splashy Projects (*.sphy)");
     gtk_file_filter_add_pattern(filter, "*.sphy");
     gtk_file_chooser_add_filter(chooser, filter);
 
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+    if (gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(chooser);
         load_project(app, filename);
         g_free(filename);
     }
-    gtk_widget_destroy(dialog);
+    g_object_unref(dialog);
 }
 
 static void on_save_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
 
-    GtkWidget *dialog;
+    GtkFileChooserNative *dialog;
     GtkFileChooser *chooser;
     GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_SAVE;
     gint res;
 
-    dialog = gtk_file_chooser_dialog_new("Export Image",
+    dialog = gtk_file_chooser_native_new("Export Image",
                                          GTK_WINDOW(app->window),
                                          action,
-                                         "_Cancel",
-                                         GTK_RESPONSE_CANCEL,
                                          "_Export",
-                                         GTK_RESPONSE_ACCEPT,
-                                         NULL);
+                                         "_Cancel");
     chooser = GTK_FILE_CHOOSER(dialog);
 
     gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
     gtk_file_chooser_set_current_name(chooser, "drawing.png");
 
-    res = gtk_dialog_run(GTK_DIALOG(dialog));
+    res = gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog));
     if (res == GTK_RESPONSE_ACCEPT) {
         char *filename;
         filename = gtk_file_chooser_get_filename(chooser);
@@ -1514,7 +1554,7 @@ static void on_save_clicked(GtkButton *btn, gpointer user_data) {
         g_free(filename);
     }
 
-    gtk_widget_destroy(dialog);
+    g_object_unref(dialog);
 }
 
 static void export_pdf(AppState *app, const char *filename) {
@@ -1548,21 +1588,20 @@ static void on_export_pdf_clicked(GtkButton *btn, gpointer user_data) {
     AppState *app = (AppState *)user_data;
     (void)btn;
 
-    GtkWidget *dialog = gtk_file_chooser_dialog_new("Export PDF",
+    GtkFileChooserNative *dialog = gtk_file_chooser_native_new("Export PDF",
                                          GTK_WINDOW(app->window),
                                          GTK_FILE_CHOOSER_ACTION_SAVE,
-                                         "_Cancel", GTK_RESPONSE_CANCEL,
-                                         "_Export", GTK_RESPONSE_ACCEPT, NULL);
+                                         "_Export", "_Cancel");
     GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
     gtk_file_chooser_set_do_overwrite_confirmation(chooser, TRUE);
     gtk_file_chooser_set_current_name(chooser, "drawing.pdf");
 
-    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+    if (gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(chooser);
         export_pdf(app, filename);
         g_free(filename);
     }
-    gtk_widget_destroy(dialog);
+    g_object_unref(dialog);
 }
 
 static void on_clear_clicked(GtkButton *btn, gpointer user_data) {
@@ -1874,6 +1913,10 @@ static void activate(GtkApplication *app_ptr, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+#ifdef __APPLE__
+    configure_macos_bundle_environment();
+#endif
+
     AppState *app = malloc(sizeof(AppState));
     // Defaults
     app->current_tool = TOOL_PEN;

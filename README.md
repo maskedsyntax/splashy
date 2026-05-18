@@ -33,9 +33,16 @@
 **Prerequisites:** [Homebrew](https://brew.sh/)
 ```bash
 brew install gtk+3 cairo pkg-config
-make macos
+make macos-bundle
 open build/Splashy.app
 ```
+
+For Mac App Store submission, sign the sandboxed bundle and build the uploadable package:
+```bash
+make macos-pkg APP_STORE_IDENTITY="3rd Party Mac Developer Application: Your Name (TEAMID)" INSTALLER_IDENTITY="3rd Party Mac Developer Installer: Your Name (TEAMID)"
+```
+
+The bundle uses App Sandbox with user-selected read/write file access, which matches Splashy's open/save/export dialogs without granting broad filesystem access.
 
 ### Linux
 **Prerequisites (Debian/Ubuntu):**
